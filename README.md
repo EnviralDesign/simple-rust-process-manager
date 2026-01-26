@@ -121,6 +121,19 @@ cargo build --release
 
 MIT License - feel free to use this for any purpose.
 
+## Donations & Support
+
+If this saves you time or pain, you can support the work here:
+
+- Patreon (recurring)
+- GitHub Sponsors (recurring)
+- PayPal (one-time)
+
+Links:
+- https://www.patreon.com/EnviralDesign
+- https://github.com/sponsors/EnviralDesign
+- https://www.paypal.com/donate?hosted_button_id=RP8EJAHSDTZ86
+
 ## Contributing
 
 Contributions welcome! Please open an issue or PR.
