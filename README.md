@@ -5,6 +5,8 @@ A fast, no-nonsense process manager built with Rust + Dioxus. Start whole stacks
 ![Process Manager](https://img.shields.io/badge/rust-1.70+-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+![Process Manager UI](images/image1.png)
+
 ## Features
 
 - **Process Management**: Start, stop, and restart multiple processes with a single click
