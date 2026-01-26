@@ -147,6 +147,7 @@ impl AppConfig {
     }
 
     /// Update a process configuration
+    #[allow(dead_code)]
     pub fn update_process(&mut self, id: &str, updated: ProcessConfig) {
         if let Some(process) = self.processes.iter_mut().find(|p| p.id == id) {
             *process = updated;

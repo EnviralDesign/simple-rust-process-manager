@@ -404,6 +404,14 @@ body {
 }
 
 .log-line.stderr {
+    color: var(--text-secondary);
+}
+
+.log-line.warn {
+    color: var(--warning);
+}
+
+.log-line.error {
     color: var(--danger);
 }
 
@@ -695,6 +703,8 @@ fn App() -> Element {
     let show_add_modal = use_signal(|| false);
     let show_confirm_delete: Signal<Option<String>> = use_signal(|| None);
     let mut refresh_counter = use_signal(|| 0u64);
+    let last_error_version = use_signal(|| 0u64);
+    let window = dioxus::desktop::use_window();
 
     // Initialize manager once and store globally for cleanup
     let manager = use_hook(|| {
@@ -725,6 +735,26 @@ fn App() -> Element {
                     }
                     refresh_counter.set(*rx.borrow());
                 }
+            }
+        }
+    });
+
+    // Flash taskbar icon when new errors arrive and the window isn't focused.
+    use_effect({
+        let manager = manager.clone();
+        let mut last_error_version = last_error_version.clone();
+        let window = window.clone();
+        move || {
+            let _ = *refresh_counter.read();
+            let current = manager.error_version();
+            let last_seen = *last_error_version.read();
+            if current > last_seen {
+                if !window.is_focused() {
+                    window.request_user_attention(Some(
+                        dioxus::desktop::tao::window::UserAttentionType::Informational,
+                    ));
+                }
+                last_error_version.set(current);
             }
         }
     });
@@ -1081,13 +1111,37 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
                     } else {
                         for (i, line) in logs.iter().enumerate() {
                             {
-                                let log_class = if line.starts_with("[stderr]") {
-                                    "log-line stderr"
-                                } else if line.starts_with("[") && line.ends_with("]") {
+                                let trimmed = line.trim();
+                                let (content, from_stderr) = if let Some(rest) = trimmed.strip_prefix("[stderr] ") {
+                                    (rest, true)
+                                } else if let Some(rest) = trimmed.strip_prefix("[stderr]") {
+                                    (rest.trim_start(), true)
+                                } else {
+                                    (trimmed, false)
+                                };
+
+                                let lower = content.to_ascii_lowercase();
+                                let is_error = lower.contains("error")
+                                    || lower.contains("critical")
+                                    || lower.contains("fatal")
+                                    || lower.contains("panic")
+                                    || lower.contains("traceback")
+                                    || lower.contains("exception");
+                                let is_warn = lower.contains("warn");
+                                let is_system = trimmed.starts_with("[") && trimmed.ends_with("]");
+
+                                let log_class = if is_system {
                                     "log-line system"
+                                } else if is_error {
+                                    "log-line error"
+                                } else if is_warn {
+                                    "log-line warn"
+                                } else if from_stderr {
+                                    "log-line stderr"
                                 } else {
                                     "log-line"
                                 };
+
                                 rsx! {
                                     div {
                                         key: "{i}",

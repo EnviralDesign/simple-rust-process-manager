@@ -1,6 +1,6 @@
 # Simple Rust Process Manager
 
-A lightweight, cross-platform process manager built with Rust and Dioxus. Perfect for managing multiple development services, Docker containers, and background processes from a single GUI.
+A fast, no-nonsense process manager built with Rust + Dioxus. Start whole stacks in one click, watch logs live, and actually stop everything cleanly (even messy toolchains like npm/uv). It's small, snappy, and built for real dev workflows.
 
 ![Process Manager](https://img.shields.io/badge/rust-1.70+-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -8,9 +8,11 @@ A lightweight, cross-platform process manager built with Rust and Dioxus. Perfec
 ## Features
 
 - **Process Management**: Start, stop, and restart multiple processes with a single click
+- **Real Process Tree Control (Windows)**: Uses Job Objects to kill entire trees so nothing gets orphaned
 - **Docker Integration**: Seamlessly control Docker containers alongside regular processes
 - **Live Log Streaming**: View real-time output from any managed process
 - **Status Monitoring**: Visual indicators show running/stopped state for each process
+- **Error Attention**: Flashes the taskbar icon on new errors when the app is unfocused
 - **Portable Configuration**: JSON config file lives next to the executable for easy portability
 - **Global Controls**: Start All, Stop All, Restart All buttons for quick environment setup
 - **Graceful Shutdown**: Regular processes are killed on app close; Docker containers persist
@@ -41,7 +43,7 @@ Check the [Releases](https://github.com/yourusername/simple-rust-process-manager
 
 2. **Adding Processes**: Click the "+" button to add a new process entry. Fill in:
    - **Name**: A friendly name for the process
-   - **Command**: The command to run (e.g., `npm run dev`)
+   - **Command**: The command to run (e.g., `npm run dev`, `uv run dev`)
    - **Working Directory**: Where to run the command from
    - **Type**: Either "Process" or "Docker"
 
@@ -51,6 +53,11 @@ Check the [Releases](https://github.com/yourusername/simple-rust-process-manager
    - Use global controls in the header for batch operations
 
 4. **Docker Containers**: For Docker entries, specify the container name. The manager will use `docker start/stop/restart` commands.
+
+## Command Notes (Direct Spawn)
+
+Commands are executed directly (no shell), which keeps process IDs tight and makes stop/kill reliable.  
+That also means shell operators like `&&`, `|`, `>` aren't supported in the command box. If you need them, wrap the logic in a `.cmd`/`.bat`/`.ps1` or a script and call that script instead.
 
 ## Configuration
 
