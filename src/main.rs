@@ -753,6 +753,13 @@ fn App() -> Element {
                     window.request_user_attention(Some(
                         dioxus::desktop::tao::window::UserAttentionType::Informational,
                     ));
+                    
+                    // Stop flashing after 5 seconds
+                    let window = window.clone();
+                    spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        window.request_user_attention(None);
+                    });
                 }
                 last_error_version.set(current);
             }
