@@ -256,9 +256,15 @@ impl ProcessManager {
                 cmd.current_dir(&working_dir);
             }
 
+            // Explicitly inherit the parent process's environment variables.
+            // This is critical on Windows when using CREATE_NO_WINDOW, as the
+            // spawned process may otherwise receive an incomplete PATH that
+            // doesn't include user-specific directories (e.g., where npm lives).
+            cmd.envs(std::env::vars());
+
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
-            
+
             // Hide console window on Windows
             #[cfg(windows)]
             {
@@ -885,9 +891,14 @@ fn assign_job(job: &JobHandle, child: &Child) -> Result<(), String> {
 fn build_command(program: &str, args: &[String]) -> Result<(Command, String), String> {
     let resolved = resolve_program(program)?;
     if resolved.is_cmd_script {
-        let cmdline = build_cmdline(&resolved.path, args);
+        // Don't pre-quote! Let Rust's Command API handle argument quoting.
+        // Previously we used build_cmdline() which quoted the path, then
+        // cmd.args(["/S", "/C", &cmdline]) caused Rust to quote the whole
+        // cmdline again, resulting in literal backslash-quote characters.
         let mut cmd = Command::new("cmd");
-        cmd.args(["/S", "/C", &cmdline]);
+        cmd.arg("/C");
+        cmd.arg(&resolved.path);
+        cmd.args(args);
         Ok((cmd, format!("cmd /C {}", resolved.path)))
     } else {
         let mut cmd = Command::new(&resolved.path);
