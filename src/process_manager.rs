@@ -709,7 +709,20 @@ impl ProcessManager {
     /// Restart a process
     pub fn restart_process(&self, id: &str) {
         self.stop_process(id);
-        thread::sleep(std::time::Duration::from_millis(500));
+        
+        // Wait for process to stop (max 5 seconds)
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < 5 {
+            thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(status) = self.get_status(id) {
+                if status == ProcessStatus::Stopped || matches!(status, ProcessStatus::Error(_)) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        
         self.start_process(id);
     }
 
@@ -738,7 +751,27 @@ impl ProcessManager {
     /// Restart all processes
     pub fn restart_all(&self) {
         self.stop_all();
-        thread::sleep(std::time::Duration::from_millis(500));
+        
+        // Wait for all processes to stop (max 5 seconds)
+        let start = std::time::Instant::now();
+        loop {
+            let all_stopped = {
+                let processes = self.processes.lock().unwrap();
+                processes.values().all(|p| p.status == ProcessStatus::Stopped || matches!(p.status, ProcessStatus::Error(_)))
+            };
+
+            if all_stopped {
+                break;
+            }
+
+            if start.elapsed().as_secs() > 5 {
+                println!("[WARN] Restart all timeout waiting for stops");
+                break;
+            }
+
+            thread::sleep(std::time::Duration::from_millis(100));
+        }
+
         self.start_all();
     }
 
