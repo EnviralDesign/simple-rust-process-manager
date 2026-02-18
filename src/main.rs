@@ -14,27 +14,28 @@ use std::sync::Arc;
 // CSS Styles embedded in the app
 const STYLES: &str = r#"
 :root {
-    --bg-primary: #0f0f14;
-    --bg-secondary: #16161e;
-    --bg-tertiary: #1e1e28;
-    --bg-hover: #252532;
-    --accent-primary: #7c3aed;
-    --accent-secondary: #a78bfa;
-    --accent-glow: rgba(124, 58, 237, 0.3);
-    --text-primary: #e4e4e7;
-    --text-secondary: #a1a1aa;
-    --text-muted: #71717a;
-    --success: #22c55e;
-    --success-glow: rgba(34, 197, 94, 0.2);
-    --warning: #f59e0b;
-    --danger: #ef4444;
-    --danger-glow: rgba(239, 68, 68, 0.2);
-    --border: #27272a;
-    --border-light: #3f3f46;
-    --radius: 8px;
-    --radius-lg: 12px;
-    --shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-    --transition: all 0.2s ease;
+    --bg-primary: #0c1117;
+    --bg-secondary: #111722;
+    --bg-tertiary: #161d2a;
+    --bg-hover: #1c2534;
+    --accent-primary: #3b82f6;
+    --accent-secondary: #93c5fd;
+    --accent-glow: rgba(59, 130, 246, 0.14);
+    --text-primary: #e5e7eb;
+    --text-secondary: #b7c0cd;
+    --text-muted: #8892a0;
+    --success: #16a34a;
+    --success-soft: rgba(22, 163, 74, 0.2);
+    --warning: #d97706;
+    --warning-soft: rgba(217, 119, 6, 0.2);
+    --danger: #dc2626;
+    --danger-soft: rgba(220, 38, 38, 0.2);
+    --border: #253043;
+    --border-light: #344259;
+    --radius: 7px;
+    --radius-lg: 10px;
+    --shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    --transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
 }
 
 * {
@@ -44,17 +45,18 @@ const STYLES: &str = r#"
 }
 
 body {
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
     background: var(--bg-primary);
     color: var(--text-primary);
     overflow: hidden;
+    font-size: 13px;
 }
 
 .app-container {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background: linear-gradient(135deg, var(--bg-primary) 0%, #12121a 100%);
+    background: linear-gradient(180deg, #0d131b 0%, #0b1118 100%);
 }
 
 /* Header */
@@ -62,52 +64,66 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 20px;
+    padding: 10px 14px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border);
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
     z-index: 100;
 }
 
 .header-title {
     display: flex;
     align-items: center;
-    gap: 10px;
-    font-size: 18px;
+    gap: 8px;
+    font-size: 15px;
     font-weight: 600;
     color: var(--text-primary);
 }
 
 .header-title-icon {
-    font-size: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 22px;
+    padding: 0 6px;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    font-family: 'Cascadia Mono', 'Consolas', monospace;
+    color: var(--text-secondary);
 }
 
 .header-actions {
     display: flex;
-    gap: 8px;
+    gap: 6px;
 }
 
 .header-separator {
     color: var(--text-muted);
-    margin: 0 4px;
+    margin: 0 2px;
 }
 
 .stack-name {
-    color: var(--accent-secondary);
+    color: var(--text-secondary);
     cursor: pointer;
-    padding: 2px 8px;
+    padding: 2px 6px;
     border-radius: var(--radius);
     transition: var(--transition);
 }
 
 .stack-name:hover {
-    background: var(--bg-hover);
+    background: var(--bg-tertiary);
+    color: var(--accent-secondary);
 }
 
 .edit-icon {
-    font-size: 14px;
+    font-size: 11px;
     opacity: 0.5;
     transition: var(--transition);
+    letter-spacing: 0.2px;
 }
 
 .stack-name:hover .edit-icon {
@@ -116,24 +132,24 @@ body {
 
 .stack-name-input {
     background: var(--bg-primary);
-    border: 1px solid var(--accent-primary);
+    border: 1px solid var(--border-light);
     border-radius: var(--radius);
-    color: var(--accent-secondary);
-    font-size: 18px;
+    color: var(--text-primary);
+    font-size: 15px;
     font-weight: 600;
-    padding: 2px 10px;
-    width: 200px;
+    padding: 4px 8px;
+    width: 190px;
     outline: none;
 }
 
 .btn {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 14px;
+    gap: 4px;
+    padding: 6px 10px;
     border: none;
     border-radius: var(--radius);
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     transition: var(--transition);
@@ -145,55 +161,54 @@ body {
 .btn:hover {
     background: var(--bg-hover);
     border-color: var(--border-light);
-    transform: translateY(-1px);
 }
 
 .btn-primary {
-    background: var(--accent-primary);
-    border-color: var(--accent-primary);
-    color: white;
+    background: rgba(59, 130, 246, 0.18);
+    border-color: rgba(96, 165, 250, 0.5);
+    color: #bfdbfe;
 }
 
 .btn-primary:hover {
-    background: #8b5cf6;
-    box-shadow: 0 0 20px var(--accent-glow);
+    background: rgba(59, 130, 246, 0.26);
+    box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .btn-success {
-    background: var(--success);
-    border-color: var(--success);
-    color: white;
+    background: var(--success-soft);
+    border-color: rgba(34, 197, 94, 0.45);
+    color: #86efac;
 }
 
 .btn-success:hover {
-    box-shadow: 0 0 20px var(--success-glow);
+    background: rgba(22, 163, 74, 0.28);
 }
 
 .btn-danger {
-    background: var(--danger);
-    border-color: var(--danger);
-    color: white;
+    background: var(--danger-soft);
+    border-color: rgba(248, 113, 113, 0.45);
+    color: #fca5a5;
 }
 
 .btn-danger:hover {
-    box-shadow: 0 0 20px var(--danger-glow);
+    background: rgba(220, 38, 38, 0.28);
 }
 
 .btn-warning {
-    background: var(--warning);
-    border-color: var(--warning);
-    color: #1a1a1a;
+    background: var(--warning-soft);
+    border-color: rgba(251, 191, 36, 0.45);
+    color: #fcd34d;
 }
 
 .btn-icon {
-    padding: 8px;
-    min-width: 34px;
+    padding: 6px;
+    min-width: 30px;
     justify-content: center;
 }
 
 .btn-small {
-    padding: 5px 10px;
-    font-size: 12px;
+    padding: 4px 8px;
+    font-size: 11px;
 }
 
 /* Main Layout */
@@ -205,7 +220,7 @@ body {
 
 /* Sidebar */
 .sidebar {
-    width: 280px;
+    width: 248px;
     background: var(--bg-secondary);
     border-right: 1px solid var(--border);
     display: flex;
@@ -217,22 +232,22 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 16px;
+    padding: 10px 12px;
     border-bottom: 1px solid var(--border);
 }
 
 .sidebar-title {
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.8px;
     color: var(--text-muted);
 }
 
 .process-list {
     flex: 1;
     overflow-y: auto;
-    padding: 8px;
+    padding: 6px;
 }
 
 .process-list::-webkit-scrollbar {
@@ -251,36 +266,36 @@ body {
 .process-item {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 12px 14px;
-    margin-bottom: 4px;
+    gap: 8px;
+    padding: 9px 10px;
+    margin-bottom: 3px;
     border-radius: var(--radius);
     cursor: pointer;
     transition: var(--transition);
-    border: 1px solid transparent;
+    border: 1px solid var(--bg-secondary);
 }
 
 .process-item:hover {
-    background: var(--bg-hover);
+    background: rgba(148, 163, 184, 0.07);
+    border-color: var(--border);
 }
 
 .process-item.active {
-    background: var(--bg-tertiary);
-    border-color: var(--accent-primary);
-    box-shadow: 0 0 15px var(--accent-glow);
+    background: rgba(59, 130, 246, 0.1);
+    border-color: rgba(96, 165, 250, 0.55);
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.1);
 }
 
 .process-status-dot {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
 }
 
 .process-status-dot.running {
     background: var(--success);
-    box-shadow: 0 0 8px var(--success);
-    animation: pulse 2s infinite;
+    box-shadow: 0 0 0 3px var(--success-soft);
 }
 
 .process-status-dot.stopped {
@@ -290,17 +305,17 @@ body {
 .process-status-dot.starting,
 .process-status-dot.stopping {
     background: var(--warning);
-    animation: pulse 1s infinite;
+    animation: pulse 1.3s infinite;
 }
 
 .process-status-dot.error {
     background: var(--danger);
-    box-shadow: 0 0 8px var(--danger);
+    box-shadow: 0 0 0 3px var(--danger-soft);
 }
 
 @keyframes pulse {
     0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
+    50% { opacity: 0.55; }
 }
 
 .process-info {
@@ -309,8 +324,8 @@ body {
 }
 
 .process-name {
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 600;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
@@ -318,7 +333,7 @@ body {
 }
 
 .process-type {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-muted);
     display: flex;
     align-items: center;
@@ -327,17 +342,19 @@ body {
 }
 
 .process-type-badge {
-    padding: 1px 6px;
+    padding: 1px 5px;
     border-radius: 4px;
-    background: var(--bg-primary);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
     font-size: 10px;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.35px;
 }
 
 .process-type-badge.docker {
-    background: #1d4ed8;
-    color: white;
+    background: rgba(37, 99, 235, 0.2);
+    border-color: rgba(96, 165, 250, 0.5);
+    color: #93c5fd;
 }
 
 /* Content Area */
@@ -352,19 +369,19 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: 10px 14px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--border);
 }
 
 .content-title {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 600;
 }
 
 .content-actions {
     display: flex;
-    gap: 6px;
+    gap: 5px;
 }
 
 .log-container {
@@ -376,12 +393,12 @@ body {
 
 .log-output {
     flex: 1;
-    padding: 16px;
+    padding: 12px 14px;
     overflow-y: auto;
-    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-    font-size: 13px;
-    line-height: 1.6;
-    background: var(--bg-primary);
+    font-family: 'Cascadia Mono', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    background: #0a0f15;
     white-space: pre-wrap;
     word-break: break-all;
 }
@@ -417,7 +434,6 @@ body {
 
 .log-line.system {
     color: var(--accent-secondary);
-    font-style: italic;
 }
 
 /* Empty State */
@@ -428,20 +444,27 @@ body {
     align-items: center;
     justify-content: center;
     color: var(--text-muted);
-    gap: 16px;
+    gap: 8px;
+    text-align: center;
 }
 
 .empty-state-icon {
-    font-size: 48px;
-    opacity: 0.3;
+    font-family: 'Cascadia Mono', 'Consolas', monospace;
+    font-size: 20px;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    border: 1px dashed var(--border-light);
+    border-radius: 6px;
+    padding: 6px 10px;
+    opacity: 0.85;
 }
 
 .empty-state-text {
-    font-size: 16px;
+    font-size: 15px;
 }
 
 .empty-state-hint {
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text-muted);
 }
 
@@ -452,8 +475,8 @@ body {
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(4px);
+    background: rgba(0, 0, 0, 0.58);
+    backdrop-filter: blur(2px);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -465,7 +488,7 @@ body {
     border-radius: var(--radius-lg);
     border: 1px solid var(--border);
     box-shadow: var(--shadow);
-    width: 450px;
+    width: 420px;
     max-width: 90vw;
     max-height: 90vh;
     overflow: hidden;
@@ -475,12 +498,12 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 18px 20px;
+    padding: 12px 14px;
     border-bottom: 1px solid var(--border);
 }
 
 .modal-title {
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 600;
 }
 
@@ -489,8 +512,8 @@ body {
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    font-size: 20px;
-    padding: 4px;
+    font-size: 18px;
+    padding: 2px 6px;
     border-radius: 4px;
     transition: var(--transition);
 }
@@ -501,29 +524,29 @@ body {
 }
 
 .modal-body {
-    padding: 20px;
+    padding: 14px;
 }
 
 .form-group {
-    margin-bottom: 18px;
+    margin-bottom: 14px;
 }
 
 .form-label {
     display: block;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
-    margin-bottom: 6px;
+    margin-bottom: 5px;
 }
 
 .form-input {
     width: 100%;
-    padding: 10px 14px;
+    padding: 8px 10px;
     background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: 13px;
     transition: var(--transition);
 }
 
@@ -539,12 +562,12 @@ body {
 
 .form-select {
     width: 100%;
-    padding: 10px 14px;
+    padding: 8px 10px;
     background: var(--bg-primary);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: 13px;
     cursor: pointer;
 }
 
@@ -554,7 +577,7 @@ body {
 }
 
 .form-hint {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-muted);
     margin-top: 4px;
 }
@@ -562,8 +585,8 @@ body {
 .modal-footer {
     display: flex;
     justify-content: flex-end;
-    gap: 10px;
-    padding: 16px 20px;
+    gap: 8px;
+    padding: 10px 14px;
     border-top: 1px solid var(--border);
     background: var(--bg-tertiary);
 }
@@ -572,44 +595,49 @@ body {
 .status-badge {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
+    gap: 4px;
+    padding: 2px 8px;
     border-radius: 20px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 500;
+    border: 1px solid transparent;
 }
 
 .status-badge.running {
-    background: var(--success-glow);
-    color: var(--success);
+    background: var(--success-soft);
+    color: #86efac;
+    border-color: rgba(34, 197, 94, 0.45);
 }
 
 .status-badge.stopped {
-    background: rgba(113, 113, 122, 0.2);
+    background: rgba(136, 146, 160, 0.16);
     color: var(--text-muted);
+    border-color: rgba(136, 146, 160, 0.35);
 }
 
 .status-badge.starting,
 .status-badge.stopping {
-    background: rgba(245, 158, 11, 0.2);
-    color: var(--warning);
+    background: var(--warning-soft);
+    color: #fcd34d;
+    border-color: rgba(251, 191, 36, 0.45);
 }
 
 .status-badge.error {
-    background: var(--danger-glow);
-    color: var(--danger);
+    background: var(--danger-soft);
+    color: #fca5a5;
+    border-color: rgba(248, 113, 113, 0.45);
 }
 
 /* Confirm Dialog */
 .confirm-dialog {
     text-align: center;
-    padding: 20px;
+    padding: 16px;
 }
 
 .confirm-dialog-text {
-    font-size: 15px;
+    font-size: 14px;
     color: var(--text-secondary);
-    margin-bottom: 20px;
+    margin-bottom: 14px;
 }
 
 .confirm-dialog-actions {
@@ -819,7 +847,7 @@ fn Header(state: AppState) -> Element {
             class: "header",
             div {
                 class: "header-title",
-                span { class: "header-title-icon", "⚡" }
+                span { class: "header-title-icon", "PM" }
                 span { "Process Manager" }
                 span { class: "header-separator", " — " }
                 if *editing_stack_name.read() {
@@ -860,7 +888,7 @@ fn Header(state: AppState) -> Element {
                             editing_stack_name.set(true);
                         },
                         "{stack_name}"
-                        span { class: "edit-icon", title: "Click to edit", " ✏️" }
+                        span { class: "edit-icon", title: "Click to edit", " rename" }
                     }
                 }
             }
@@ -872,7 +900,7 @@ fn Header(state: AppState) -> Element {
                     onclick: move |_| {
                         get_manager().start_all();
                     },
-                    "▶ Start All"
+                    "Start All"
                 }
                 button {
                     class: "btn btn-danger",
@@ -880,7 +908,7 @@ fn Header(state: AppState) -> Element {
                     onclick: move |_| {
                         get_manager().stop_all();
                     },
-                    "◼ Stop All"
+                    "Stop All"
                 }
                 button {
                     class: "btn btn-warning",
@@ -888,7 +916,7 @@ fn Header(state: AppState) -> Element {
                     onclick: move |_| {
                         get_manager().restart_all();
                     },
-                    "↻ Restart All"
+                    "Restart All"
                 }
             }
         }
@@ -922,7 +950,7 @@ fn Sidebar(state: AppState) -> Element {
                     div {
                         class: "empty-state",
                         style: "padding: 40px 20px;",
-                        div { class: "empty-state-icon", "📋" }
+                        div { class: "empty-state-icon", "[ ]" }
                         div { class: "empty-state-text", "No processes yet" }
                         div { class: "empty-state-hint", "Click + to add one" }
                     }
@@ -1023,7 +1051,7 @@ fn EmptyState() -> Element {
             class: "content-area",
             div {
                 class: "empty-state",
-                div { class: "empty-state-icon", "🖥️" }
+                div { class: "empty-state-icon", "[log]" }
                 div { class: "empty-state-text", "Select a process to view logs" }
                 div { class: "empty-state-hint", "Or add a new process using the + button" }
             }
@@ -1076,7 +1104,7 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
                         onclick: move |_| {
                             get_manager().start_process(&id_start);
                         },
-                        "▶"
+                        "Start"
                     }
                     button {
                         class: "btn btn-danger btn-small",
@@ -1084,7 +1112,7 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
                         onclick: move |_| {
                             get_manager().stop_process(&id_stop);
                         },
-                        "◼"
+                        "Stop"
                     }
                     button {
                         class: "btn btn-warning btn-small",
@@ -1092,7 +1120,7 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
                         onclick: move |_| {
                             get_manager().restart_process(&id_restart);
                         },
-                        "↻"
+                        "Restart"
                     }
                     button {
                         class: "btn btn-small",
@@ -1101,7 +1129,7 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
                         onclick: move |_| {
                             confirm_delete.set(Some(id_delete.clone()));
                         },
-                        "🗑"
+                        "Del"
                     }
                 }
             }
