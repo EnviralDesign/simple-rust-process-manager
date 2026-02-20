@@ -10,11 +10,13 @@ A fast, no-nonsense process manager built with Rust + Dioxus. Start whole stacks
 ## Features
 
 - **Process Management**: Start, stop, and restart multiple processes with a single click
+- **Entry Editing**: Update process definitions in place (no delete/recreate cycle)
 - **Real Process Tree Control (Windows)**: Uses Job Objects to kill entire trees so nothing gets orphaned
 - **Docker Integration**: Seamlessly control Docker containers alongside regular processes
 - **Live Log Streaming**: View real-time output from any managed process
 - **Status Monitoring**: Visual indicators show running/stopped state for each process
 - **Error Attention**: Flashes the taskbar icon on new errors when the app is unfocused
+- **Managed Restart (Per Entry)**: Opt-in restart when a process/container goes down unexpectedly
 - **Portable Configuration**: JSON config file lives next to the executable for easy portability
 - **Global Controls**: Start All, Stop All, Restart All buttons for quick environment setup
 - **Graceful Shutdown**: Regular processes are killed on app close; Docker containers persist
@@ -48,10 +50,11 @@ Check the [Releases](https://github.com/yourusername/simple-rust-process-manager
    - **Command**: The command to run (e.g., `npm run dev`, `uv run dev`)
    - **Working Directory**: Where to run the command from
    - **Type**: Either "Process" or "Docker"
+   - **Managed Restart**: Automatically restart this entry if it goes down
 
 3. **Managing Processes**:
    - Click on a process in the left sidebar to view its logs
-   - Use the play/stop/restart buttons on each process card
+   - Use the play/stop/restart/edit/delete buttons on each process card
    - Use global controls in the header for batch operations
 
 4. **Docker Containers**: For Docker entries, specify the container name. The manager will use `docker start/stop/restart` commands.

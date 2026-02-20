@@ -357,6 +357,12 @@ body {
     color: #93c5fd;
 }
 
+.process-type-badge.managed {
+    background: var(--success-soft);
+    border-color: rgba(34, 197, 94, 0.45);
+    color: #86efac;
+}
+
 /* Content Area */
 .content-area {
     flex: 1;
@@ -582,6 +588,18 @@ body {
     margin-top: 4px;
 }
 
+.form-checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.form-checkbox {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent-primary);
+}
+
 .modal-footer {
     display: flex;
     justify-content: flex-end;
@@ -653,7 +671,7 @@ static GLOBAL_MANAGER: std::sync::OnceLock<Arc<ProcessManager>> = std::sync::Onc
 fn main() {
     // Load icon from assets folder next to executable
     let icon = load_icon();
-    
+
     // Build the Dioxus app with desktop config
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
@@ -664,8 +682,8 @@ fn main() {
                         .with_title("Process Manager")
                         .with_inner_size(dioxus::desktop::LogicalSize::new(1100.0, 700.0))
                         .with_min_inner_size(dioxus::desktop::LogicalSize::new(800.0, 500.0))
-                        .with_window_icon(icon)
-                )
+                        .with_window_icon(icon),
+                ),
         )
         .launch(App);
 }
@@ -676,19 +694,19 @@ fn load_icon() -> Option<dioxus::desktop::tao::window::Icon> {
     let exe_path = std::env::current_exe().ok()?;
     let exe_dir = exe_path.parent()?;
     let icon_path = exe_dir.join("assets").join("icon.png");
-    
+
     // If not found next to exe, try current working directory
     let icon_path = if icon_path.exists() {
         icon_path
     } else {
         std::path::PathBuf::from("assets/icon.png")
     };
-    
+
     let icon_bytes = std::fs::read(&icon_path).ok()?;
     let image = image::load_from_memory(&icon_bytes).ok()?.to_rgba8();
     let (width, height) = image.dimensions();
     let rgba = image.into_raw();
-    
+
     dioxus::desktop::tao::window::Icon::from_rgba(rgba, width, height).ok()
 }
 
@@ -698,6 +716,7 @@ struct AppState {
     config: Signal<AppConfig>,
     selected_process: Signal<Option<String>>,
     show_add_modal: Signal<bool>,
+    show_edit_modal: Signal<Option<String>>,
     show_confirm_delete: Signal<Option<String>>,
     // Force re-render counter for log updates
     refresh_counter: Signal<u64>,
@@ -710,6 +729,7 @@ struct NewProcessForm {
     command: String,
     working_directory: String,
     process_type: String,
+    auto_restart: bool,
 }
 
 impl Default for NewProcessForm {
@@ -719,6 +739,19 @@ impl Default for NewProcessForm {
             command: String::new(),
             working_directory: String::new(),
             process_type: "Process".to_string(), // Default to shell command
+            auto_restart: false,
+        }
+    }
+}
+
+impl NewProcessForm {
+    fn from_process(process: &ProcessConfig) -> Self {
+        Self {
+            name: process.name.clone(),
+            command: process.command.clone(),
+            working_directory: process.working_directory.clone(),
+            process_type: process.process_type.to_string(),
+            auto_restart: process.auto_restart,
         }
     }
 }
@@ -729,6 +762,7 @@ fn App() -> Element {
     let config = use_signal(AppConfig::load);
     let selected_process: Signal<Option<String>> = use_signal(|| None);
     let show_add_modal = use_signal(|| false);
+    let show_edit_modal: Signal<Option<String>> = use_signal(|| None);
     let show_confirm_delete: Signal<Option<String>> = use_signal(|| None);
     let mut refresh_counter = use_signal(|| 0u64);
     let last_error_version = use_signal(|| 0u64);
@@ -781,7 +815,7 @@ fn App() -> Element {
                     window.request_user_attention(Some(
                         dioxus::desktop::tao::window::UserAttentionType::Informational,
                     ));
-                    
+
                     // Stop flashing after 5 seconds
                     let window = window.clone();
                     spawn(async move {
@@ -806,6 +840,7 @@ fn App() -> Element {
         config,
         selected_process,
         show_add_modal,
+        show_edit_modal,
         show_confirm_delete,
         refresh_counter,
     };
@@ -823,6 +858,13 @@ fn App() -> Element {
             if *state.show_add_modal.read() {
                 AddProcessModal { state }
             }
+            if let Some(process_id) = state.show_edit_modal.read().clone() {
+                EditProcessModal {
+                    key: "{process_id}",
+                    state: state,
+                    process_id: process_id.clone(),
+                }
+            }
             if state.show_confirm_delete.read().is_some() {
                 DeleteConfirmModal { state }
             }
@@ -831,7 +873,24 @@ fn App() -> Element {
 }
 
 fn get_manager() -> Arc<ProcessManager> {
-    GLOBAL_MANAGER.get().expect("Manager not initialized").clone()
+    GLOBAL_MANAGER
+        .get()
+        .expect("Manager not initialized")
+        .clone()
+}
+
+fn wait_for_process_stop(manager: &ProcessManager, id: &str) {
+    let start = std::time::Instant::now();
+    while start.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Some(status) = manager.get_status(id) {
+            if status == ProcessStatus::Stopped || matches!(status, ProcessStatus::Error(_)) {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
 }
 
 #[component]
@@ -839,9 +898,9 @@ fn Header(state: AppState) -> Element {
     let mut config = state.config;
     let mut editing_stack_name = use_signal(|| false);
     let mut temp_stack_name = use_signal(|| String::new());
-    
+
     let stack_name = config.read().stack_name.clone();
-    
+
     rsx! {
         header {
             class: "header",
@@ -974,10 +1033,12 @@ fn ProcessItem(state: AppState, process: ProcessConfig, refresh_token: u64) -> E
     let _ = refresh_token;
     let selected = state.selected_process.read();
     let is_active = selected.as_ref() == Some(&process.id);
-    
+
     let manager = get_manager();
-    let status = manager.get_status(&process.id).unwrap_or(ProcessStatus::Stopped);
-    
+    let status = manager
+        .get_status(&process.id)
+        .unwrap_or(ProcessStatus::Stopped);
+
     let status_class = match &status {
         ProcessStatus::Running => "running",
         ProcessStatus::Stopped => "stopped",
@@ -1012,6 +1073,13 @@ fn ProcessItem(state: AppState, process: ProcessConfig, refresh_token: u64) -> E
                         class: "process-type-badge {type_class}",
                         "{process.process_type}"
                     }
+                    if process.auto_restart {
+                        span {
+                            class: "process-type-badge managed",
+                            title: "Managed restart enabled",
+                            "AUTO"
+                        }
+                    }
                 }
             }
         }
@@ -1023,7 +1091,7 @@ fn ContentArea(state: AppState) -> Element {
     let selected = state.selected_process.read();
     // Read refresh counter to trigger re-renders
     let _ = *state.refresh_counter.read();
-    
+
     match selected.as_ref() {
         Some(id) => {
             let config = state.config.read();
@@ -1063,9 +1131,47 @@ fn EmptyState() -> Element {
 fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
     // Read refresh counter to trigger re-renders when process state changes
     let _ = *state.refresh_counter.read();
-    
+
+    use_effect({
+        let refresh_counter = state.refresh_counter;
+        let process_id = process.id.clone();
+        move || {
+            let _ = *refresh_counter.read();
+            let script = r#"
+                    (() => {
+                        const el = document.getElementById("log-output");
+                        if (!el) return;
+                        const threshold = 16;
+                        const processId = "__PROCESS_ID__";
+                        if (!el.dataset.pmAutoScrollBound) {
+                            el.dataset.pmAutoScrollBound = "1";
+                            el.dataset.pmStickBottom = "true";
+                            el.addEventListener("scroll", () => {
+                                const distance = el.scrollHeight - el.clientHeight - el.scrollTop;
+                                el.dataset.pmStickBottom = distance <= threshold ? "true" : "false";
+                            });
+                        }
+                        if (el.dataset.pmProcessId !== processId) {
+                            el.dataset.pmProcessId = processId;
+                            el.dataset.pmStickBottom = "true";
+                        }
+                        const distance = el.scrollHeight - el.clientHeight - el.scrollTop;
+                        const shouldStick = el.dataset.pmStickBottom !== "false" || distance <= threshold;
+                        if (shouldStick) {
+                            el.scrollTop = el.scrollHeight;
+                            el.dataset.pmStickBottom = "true";
+                        }
+                    })();
+                "#
+                .replace("__PROCESS_ID__", &process_id);
+            dioxus::document::eval(script.as_str());
+        }
+    });
+
     let manager = get_manager();
-    let status = manager.get_status(&process.id).unwrap_or(ProcessStatus::Stopped);
+    let status = manager
+        .get_status(&process.id)
+        .unwrap_or(ProcessStatus::Stopped);
     let logs = manager.get_logs(&process.id);
 
     let status_class = match &status {
@@ -1079,8 +1185,10 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
     let id_start = process.id.clone();
     let id_stop = process.id.clone();
     let id_restart = process.id.clone();
+    let id_edit = process.id.clone();
     let id_delete = process.id.clone();
 
+    let mut show_edit_modal = state.show_edit_modal;
     let mut confirm_delete = state.show_confirm_delete;
     rsx! {
         div {
@@ -1098,6 +1206,10 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
                 }
                 div {
                     class: "content-actions",
+                    span {
+                        class: "form-hint",
+                        if process.auto_restart { "Managed restart: ON" } else { "Managed restart: OFF" }
+                    }
                     button {
                         class: "btn btn-success btn-small",
                         title: "Start",
@@ -1121,6 +1233,14 @@ fn ProcessDetail(state: AppState, process: ProcessConfig) -> Element {
                             get_manager().restart_process(&id_restart);
                         },
                         "Restart"
+                    }
+                    button {
+                        class: "btn btn-small",
+                        title: "Edit",
+                        onclick: move |_| {
+                            show_edit_modal.set(Some(id_edit.clone()));
+                        },
+                        "Edit"
                     }
                     button {
                         class: "btn btn-small",
@@ -1290,6 +1410,23 @@ fn AddProcessModal(state: AppState) -> Element {
                             div { class: "form-hint", "Leave empty to use current directory" }
                         }
                     }
+                    div {
+                        class: "form-group",
+                        label { class: "form-label", "Managed Restart" }
+                        div {
+                            class: "form-checkbox-row",
+                            input {
+                                class: "form-checkbox",
+                                r#type: "checkbox",
+                                checked: form.read().auto_restart,
+                                onchange: move |e| {
+                                    let value = e.value();
+                                    form.write().auto_restart = value == "true" || value == "on";
+                                }
+                            }
+                            span { "Keep this entry running (auto-restart if it goes down)" }
+                        }
+                    }
                 }
                 div {
                     class: "modal-footer",
@@ -1302,9 +1439,15 @@ fn AddProcessModal(state: AppState) -> Element {
                         class: "btn btn-primary",
                         onclick: move |_| {
                             // Clone values out of the form before any mutations
-                            let (name, command, working_directory, process_type_str) = {
+                            let (name, command, working_directory, process_type_str, auto_restart) = {
                                 let f = form.read();
-                                (f.name.clone(), f.command.clone(), f.working_directory.clone(), f.process_type.clone())
+                                (
+                                    f.name.clone(),
+                                    f.command.clone(),
+                                    f.working_directory.clone(),
+                                    f.process_type.clone(),
+                                    f.auto_restart,
+                                )
                             };
 
                             if name.is_empty() || command.is_empty() {
@@ -1316,12 +1459,13 @@ fn AddProcessModal(state: AppState) -> Element {
                                 _ => ProcessType::Process,
                             };
 
-                            let new_process = ProcessConfig::new(
+                            let mut new_process = ProcessConfig::new(
                                 name,
                                 command,
                                 working_directory,
                                 process_type,
                             );
+                            new_process.auto_restart = auto_restart;
 
                             // Add to config and save
                             config.write().add_process(new_process.clone());
@@ -1343,13 +1487,200 @@ fn AddProcessModal(state: AppState) -> Element {
 }
 
 #[component]
+fn EditProcessModal(state: AppState, process_id: String) -> Element {
+    let process = state.config.read().get_process(&process_id).cloned();
+    let Some(process) = process else {
+        return rsx! {};
+    };
+
+    let mut form = use_signal({
+        let process = process.clone();
+        move || NewProcessForm::from_process(&process)
+    });
+    let mut show_modal = state.show_edit_modal;
+    let mut config = state.config;
+
+    let id_save = process_id.clone();
+
+    rsx! {
+        div {
+            class: "modal-overlay",
+            onclick: move |_| show_modal.set(None),
+            div {
+                class: "modal",
+                onclick: |e| e.stop_propagation(),
+                div {
+                    class: "modal-header",
+                    span { class: "modal-title", "Edit Process" }
+                    button {
+                        class: "modal-close",
+                        onclick: move |_| show_modal.set(None),
+                        "×"
+                    }
+                }
+                div {
+                    class: "modal-body",
+                    div {
+                        class: "form-group",
+                        label { class: "form-label", "Name" }
+                        input {
+                            class: "form-input",
+                            r#type: "text",
+                            value: "{form.read().name}",
+                            oninput: move |e| {
+                                form.write().name = e.value();
+                            },
+                        }
+                    }
+                    div {
+                        class: "form-group",
+                        label { class: "form-label", "Type" }
+                        select {
+                            class: "form-select",
+                            value: "{form.read().process_type}",
+                            onchange: move |e| {
+                                form.write().process_type = e.value();
+                            },
+                            option { value: "Process", "Process (Shell Command)" }
+                            option { value: "Docker", "Docker Container" }
+                        }
+                    }
+                    div {
+                        class: "form-group",
+                        label { class: "form-label",
+                            if form.read().process_type == "Docker" {
+                                "Container Name"
+                            } else {
+                                "Command"
+                            }
+                        }
+                        input {
+                            class: "form-input",
+                            r#type: "text",
+                            value: "{form.read().command}",
+                            oninput: move |e| {
+                                form.write().command = e.value();
+                            },
+                        }
+                        div {
+                            class: "form-hint",
+                            if form.read().process_type == "Docker" {
+                                "The name of the Docker container to manage"
+                            } else {
+                                "The shell command to execute"
+                            }
+                        }
+                    }
+                    if form.read().process_type != "Docker" {
+                        div {
+                            class: "form-group",
+                            label { class: "form-label", "Working Directory (optional)" }
+                            input {
+                                class: "form-input",
+                                r#type: "text",
+                                value: "{form.read().working_directory}",
+                                oninput: move |e| {
+                                    form.write().working_directory = e.value();
+                                },
+                            }
+                            div { class: "form-hint", "Leave empty to use current directory" }
+                        }
+                    }
+                    div {
+                        class: "form-group",
+                        label { class: "form-label", "Managed Restart" }
+                        div {
+                            class: "form-checkbox-row",
+                            input {
+                                class: "form-checkbox",
+                                r#type: "checkbox",
+                                checked: form.read().auto_restart,
+                                onchange: move |e| {
+                                    let value = e.value();
+                                    form.write().auto_restart = value == "true" || value == "on";
+                                }
+                            }
+                            span { "Keep this entry running (auto-restart if it goes down)" }
+                        }
+                    }
+                }
+                div {
+                    class: "modal-footer",
+                    button {
+                        class: "btn",
+                        onclick: move |_| show_modal.set(None),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        onclick: move |_| {
+                            let (name, command, working_directory, process_type_str, auto_restart) = {
+                                let f = form.read();
+                                (
+                                    f.name.clone(),
+                                    f.command.clone(),
+                                    f.working_directory.clone(),
+                                    f.process_type.clone(),
+                                    f.auto_restart,
+                                )
+                            };
+
+                            if name.is_empty() || command.is_empty() {
+                                return;
+                            }
+
+                            let process_type = match process_type_str.as_str() {
+                                "Docker" => ProcessType::Docker,
+                                _ => ProcessType::Process,
+                            };
+
+                            let auto_start = config
+                                .read()
+                                .get_process(&id_save)
+                                .map(|p| p.auto_start)
+                                .unwrap_or(false);
+
+                            let updated = ProcessConfig {
+                                id: id_save.clone(),
+                                name,
+                                command,
+                                working_directory,
+                                process_type,
+                                auto_start,
+                                auto_restart,
+                            };
+
+                            let manager = get_manager();
+                            if matches!(
+                                manager.get_status(&id_save),
+                                Some(ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Stopping)
+                            ) {
+                                manager.stop_process(&id_save);
+                                wait_for_process_stop(&manager, &id_save);
+                            }
+
+                            config.write().update_process(&id_save, updated.clone());
+                            let _ = config.read().save();
+                            let _ = manager.update_process_config(updated);
+                            show_modal.set(None);
+                        },
+                        "Save"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn DeleteConfirmModal(state: AppState) -> Element {
     let mut confirm_delete = state.show_confirm_delete;
     let mut config = state.config;
     let mut selected = state.selected_process;
 
     let id = confirm_delete.read().clone().unwrap_or_default();
-    let process_name = config.read()
+    let process_name = config
+        .read()
         .get_process(&id)
         .map(|p| p.name.clone())
         .unwrap_or_default();
@@ -1395,12 +1726,12 @@ fn DeleteConfirmModal(state: AppState) -> Element {
                                 get_manager().remove_process(&id_confirm);
                                 config.write().remove_process(&id_confirm);
                                 let _ = config.read().save();
-                                
+
                                 // Clear selection if deleted
                                 if selected.read().as_ref() == Some(&id_confirm) {
                                     selected.set(None);
                                 }
-                                
+
                                 confirm_delete.set(None);
                             },
                             "Delete"

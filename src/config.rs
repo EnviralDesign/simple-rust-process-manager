@@ -48,10 +48,18 @@ pub struct ProcessConfig {
     /// Whether to auto-start when manager launches
     #[serde(default)]
     pub auto_start: bool,
+    /// Whether to auto-restart when the process exits unexpectedly
+    #[serde(default)]
+    pub auto_restart: bool,
 }
 
 impl ProcessConfig {
-    pub fn new(name: String, command: String, working_directory: String, process_type: ProcessType) -> Self {
+    pub fn new(
+        name: String,
+        command: String,
+        working_directory: String,
+        process_type: ProcessType,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             name,
@@ -59,6 +67,7 @@ impl ProcessConfig {
             working_directory,
             process_type,
             auto_start: false,
+            auto_restart: false,
         }
     }
 }
@@ -89,30 +98,30 @@ impl AppConfig {
     /// Get the path to the config file (next to the executable)
     pub fn config_path() -> PathBuf {
         let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-        let exe_dir = exe_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let exe_dir = exe_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         exe_dir.join("processes.json")
     }
 
     /// Load config from file, creating default if not found
     pub fn load() -> Self {
         let path = Self::config_path();
-        
+
         if path.exists() {
             match fs::read_to_string(&path) {
-                Ok(content) => {
-                    match serde_json::from_str(&content) {
-                        Ok(config) => return config,
-                        Err(e) => {
-                            eprintln!("Failed to parse config: {}", e);
-                        }
+                Ok(content) => match serde_json::from_str(&content) {
+                    Ok(config) => return config,
+                    Err(e) => {
+                        eprintln!("Failed to parse config: {}", e);
                     }
-                }
+                },
                 Err(e) => {
                     eprintln!("Failed to read config: {}", e);
                 }
             }
         }
-        
+
         // Return default config
         let config = Self::default();
         let _ = config.save(); // Try to save default
@@ -124,10 +133,9 @@ impl AppConfig {
         let path = Self::config_path();
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        
-        fs::write(&path, content)
-            .map_err(|e| format!("Failed to write config: {}", e))?;
-        
+
+        fs::write(&path, content).map_err(|e| format!("Failed to write config: {}", e))?;
+
         Ok(())
     }
 

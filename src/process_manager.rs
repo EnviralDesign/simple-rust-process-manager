@@ -4,9 +4,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc,
-    Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::thread;
 
@@ -42,6 +41,7 @@ pub struct ProcessState {
     pub status: ProcessStatus,
     pub logs: Vec<String>,
     pub child: Option<Child>,
+    pub suppress_restart_once: bool,
     #[cfg(windows)]
     pub job: Option<JobHandle>,
 }
@@ -53,6 +53,7 @@ impl ProcessState {
             status: ProcessStatus::Stopped,
             logs: Vec::new(),
             child: None,
+            suppress_restart_once: false,
             #[cfg(windows)]
             job: None,
         }
@@ -106,6 +107,7 @@ impl ProcessManager {
         let processes = self.processes.clone();
         let event_tx = self.event_tx.clone();
         let event_version = self.event_version.clone();
+        let error_version = self.error_version.clone();
 
         thread::spawn(move || loop {
             thread::sleep(std::time::Duration::from_millis(750));
@@ -120,7 +122,13 @@ impl ProcessManager {
             };
 
             for id in docker_ids {
-                refresh_docker_status_inner(&id, &processes, &event_tx, &event_version);
+                refresh_docker_status_inner(
+                    &id,
+                    &processes,
+                    &event_tx,
+                    &event_version,
+                    &error_version,
+                );
             }
         });
     }
@@ -142,6 +150,18 @@ impl ProcessManager {
         self.notify();
     }
 
+    /// Update an existing process config while preserving runtime state
+    pub fn update_process_config(&self, config: ProcessConfig) -> bool {
+        let mut processes = self.processes.lock().unwrap();
+        if let Some(state) = processes.get_mut(&config.id) {
+            state.config = config;
+            self.notify();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove a process (stops it first if running)
     pub fn remove_process(&self, id: &str) {
         self.stop_process(id);
@@ -157,17 +177,21 @@ impl ProcessManager {
         let event_tx = self.event_tx.clone();
         let event_version = self.event_version.clone();
         let error_version = self.error_version.clone();
-        
+
         // Get config and update status
         let config = {
             let mut processes = processes_arc.lock().unwrap();
             println!("[DEBUG] Got lock, looking for process id: {}", id);
             if let Some(state) = processes.get_mut(id) {
-                println!("[DEBUG] Found process: {}, status: {:?}", state.config.name, state.status);
+                println!(
+                    "[DEBUG] Found process: {}, status: {:?}",
+                    state.config.name, state.status
+                );
                 if state.status == ProcessStatus::Running {
                     println!("[DEBUG] Already running, returning");
                     return; // Already running
                 }
+                state.suppress_restart_once = false;
                 state.status = ProcessStatus::Starting;
                 state.logs.clear();
                 bump_event(&event_tx, &event_version);
@@ -179,11 +203,14 @@ impl ProcessManager {
         };
 
         let id_owned = id.to_string();
-        println!("[DEBUG] Starting process type: {:?}, command: {}", config.process_type, config.command);
+        println!(
+            "[DEBUG] Starting process type: {:?}, command: {}",
+            config.process_type, config.command
+        );
 
         match config.process_type {
             ProcessType::Process => {
-                self.start_system_process(
+                Self::start_system_process(
                     &id_owned,
                     &config,
                     processes_arc,
@@ -193,7 +220,7 @@ impl ProcessManager {
                 );
             }
             ProcessType::Docker => {
-                self.start_docker_container(
+                Self::start_docker_container(
                     &id_owned,
                     &config,
                     processes_arc,
@@ -206,7 +233,6 @@ impl ProcessManager {
     }
 
     fn start_system_process(
-        &self,
         id: &str,
         config: &ProcessConfig,
         processes_arc: Arc<Mutex<HashMap<String, ProcessState>>>,
@@ -221,7 +247,7 @@ impl ProcessManager {
         thread::spawn(move || {
             println!("[DEBUG] Thread spawned for command: {}", command);
             println!("[DEBUG] Working dir: '{}'", working_dir);
-            
+
             let (program, args) = match parse_command(&command) {
                 Ok((program, args)) => (program, args),
                 Err(e) => {
@@ -304,7 +330,9 @@ impl ProcessManager {
                         let mut processes = processes_arc.lock().unwrap();
                         if let Some(state) = processes.get_mut(&id_owned) {
                             state.status = ProcessStatus::Running;
-                            state.logs.push(format!("[Started with PID {}]", child.id()));
+                            state
+                                .logs
+                                .push(format!("[Started with PID {}]", child.id()));
                             println!("[DEBUG] Status set to Running");
                             state.child = Some(child);
                             #[cfg(windows)]
@@ -396,6 +424,7 @@ impl ProcessManager {
                             thread::sleep(std::time::Duration::from_millis(500));
                             let mut updated = false;
                             let mut had_error = false;
+                            let mut should_schedule_restart = false;
                             let mut should_break = false;
                             {
                                 let mut processes = processes_monitor.lock().unwrap();
@@ -403,8 +432,20 @@ impl ProcessManager {
                                     if let Some(ref mut child) = state.child {
                                         match child.try_wait() {
                                             Ok(Some(status)) => {
-                                                state.logs.push(format!("[Process exited with: {}]", status));
-                                                state.status = ProcessStatus::Stopped;
+                                                state.logs.push(format!(
+                                                    "[Process exited with: {}]",
+                                                    status
+                                                ));
+                                                if state.config.auto_restart
+                                                    && !state.suppress_restart_once
+                                                {
+                                                    state.logs.push("[Managed process went down. Restarting...]".to_string());
+                                                    state.status = ProcessStatus::Starting;
+                                                    should_schedule_restart = true;
+                                                } else {
+                                                    state.status = ProcessStatus::Stopped;
+                                                }
+                                                state.suppress_restart_once = false;
                                                 state.child = None;
                                                 #[cfg(windows)]
                                                 {
@@ -441,6 +482,15 @@ impl ProcessManager {
                                 }
                                 bump_event(&event_tx, &event_version);
                             }
+                            if should_schedule_restart {
+                                schedule_managed_restart(
+                                    id_monitor.clone(),
+                                    processes_monitor.clone(),
+                                    event_tx.clone(),
+                                    event_version.clone(),
+                                    error_version.clone(),
+                                );
+                            }
                             if should_break {
                                 break;
                             }
@@ -461,7 +511,6 @@ impl ProcessManager {
     }
 
     fn start_docker_container(
-        &self,
         id: &str,
         config: &ProcessConfig,
         processes_arc: Arc<Mutex<HashMap<String, ProcessState>>>,
@@ -476,7 +525,7 @@ impl ProcessManager {
             // Start docker container
             let mut cmd = Command::new("docker");
             cmd.args(["start", &container_name]);
-            
+
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -489,7 +538,9 @@ impl ProcessManager {
                     if let Some(state) = processes.get_mut(&id_owned) {
                         if output.status.success() {
                             state.status = ProcessStatus::Running;
-                            state.logs.push(format!("[Docker container '{}' started]", container_name));
+                            state
+                                .logs
+                                .push(format!("[Docker container '{}' started]", container_name));
                         } else {
                             let stderr = String::from_utf8_lossy(&output.stderr);
                             state.status = ProcessStatus::Error(stderr.to_string());
@@ -538,7 +589,7 @@ impl ProcessManager {
             cmd.args(["logs", "-f", "--tail", "100", &container]);
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
-            
+
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -600,6 +651,7 @@ impl ProcessManager {
         {
             let mut processes = processes_arc.lock().unwrap();
             if let Some(state) = processes.get_mut(id) {
+                state.suppress_restart_once = true;
                 match state.config.process_type {
                     ProcessType::Process => {
                         if let Some(child) = state.child.take() {
@@ -688,7 +740,9 @@ impl ProcessManager {
                     match output {
                         Ok(out) if out.status.success() => {
                             state.status = ProcessStatus::Stopped;
-                            state.logs.push(format!("[Docker container '{}' stopped]", container_name));
+                            state
+                                .logs
+                                .push(format!("[Docker container '{}' stopped]", container_name));
                         }
                         Ok(out) => {
                             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -709,7 +763,7 @@ impl ProcessManager {
     /// Restart a process
     pub fn restart_process(&self, id: &str) {
         self.stop_process(id);
-        
+
         // Wait for process to stop (max 5 seconds)
         let start = std::time::Instant::now();
         while start.elapsed().as_secs() < 5 {
@@ -722,7 +776,7 @@ impl ProcessManager {
                 break;
             }
         }
-        
+
         self.start_process(id);
     }
 
@@ -751,13 +805,16 @@ impl ProcessManager {
     /// Restart all processes
     pub fn restart_all(&self) {
         self.stop_all();
-        
+
         // Wait for all processes to stop (max 5 seconds)
         let start = std::time::Instant::now();
         loop {
             let all_stopped = {
                 let processes = self.processes.lock().unwrap();
-                processes.values().all(|p| p.status == ProcessStatus::Stopped || matches!(p.status, ProcessStatus::Error(_)))
+                processes.values().all(|p| {
+                    p.status == ProcessStatus::Stopped
+                        || matches!(p.status, ProcessStatus::Error(_))
+                })
             };
 
             if all_stopped {
@@ -816,7 +873,10 @@ impl ProcessManager {
     /// Get logs for a process
     pub fn get_logs(&self, id: &str) -> Vec<String> {
         let processes = self.processes.lock().unwrap();
-        processes.get(id).map(|s| s.logs.clone()).unwrap_or_default()
+        processes
+            .get(id)
+            .map(|s| s.logs.clone())
+            .unwrap_or_default()
     }
 
     /// Check and update docker container status
@@ -827,17 +887,84 @@ impl ProcessManager {
             &self.processes,
             &self.event_tx,
             &self.event_version,
+            &self.error_version,
         );
     }
 }
 
 fn bump_event(event_tx: &watch::Sender<u64>, event_version: &Arc<AtomicU64>) {
-    let next = event_version.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let next = event_version
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
     let _ = event_tx.send(next);
 }
 
 fn bump_error(error_version: &Arc<AtomicU64>) {
-    let _ = error_version.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let _ = error_version
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+}
+
+fn schedule_managed_restart(
+    id: String,
+    processes: Arc<Mutex<HashMap<String, ProcessState>>>,
+    event_tx: watch::Sender<u64>,
+    event_version: Arc<AtomicU64>,
+    error_version: Arc<AtomicU64>,
+) {
+    // Reuse the same attention signal that error events use.
+    bump_error(&error_version);
+
+    thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_secs(1));
+
+        let config = {
+            let mut processes = processes.lock().unwrap();
+            let Some(state) = processes.get_mut(&id) else {
+                return;
+            };
+
+            if state.suppress_restart_once {
+                state.suppress_restart_once = false;
+                return;
+            }
+
+            if !state.config.auto_restart
+                || state.child.is_some()
+                || matches!(
+                    state.status,
+                    ProcessStatus::Running | ProcessStatus::Stopping
+                )
+            {
+                return;
+            }
+
+            state.suppress_restart_once = false;
+            state.status = ProcessStatus::Starting;
+            state.config.clone()
+        };
+
+        bump_event(&event_tx, &event_version);
+
+        match config.process_type {
+            ProcessType::Process => ProcessManager::start_system_process(
+                &id,
+                &config,
+                processes.clone(),
+                event_tx.clone(),
+                event_version.clone(),
+                error_version.clone(),
+            ),
+            ProcessType::Docker => ProcessManager::start_docker_container(
+                &id,
+                &config,
+                processes.clone(),
+                event_tx.clone(),
+                event_version.clone(),
+                error_version.clone(),
+            ),
+        }
+    });
 }
 
 fn line_has_error(line: &str) -> bool {
@@ -1011,7 +1138,11 @@ fn resolve_with_extensions(path: &std::path::Path) -> Result<ResolvedProgram, St
 }
 
 #[cfg(windows)]
-fn resolve_in_dir(dir: &std::path::Path, program: &str, extensions: &[String]) -> Option<ResolvedProgram> {
+fn resolve_in_dir(
+    dir: &std::path::Path,
+    program: &str,
+    extensions: &[String],
+) -> Option<ResolvedProgram> {
     let base = dir.join(program);
     if std::path::Path::new(program).extension().is_some() {
         return resolve_path_candidate(&base);
@@ -1160,6 +1291,7 @@ fn refresh_docker_status_inner(
     processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
     event_tx: &watch::Sender<u64>,
     event_version: &Arc<AtomicU64>,
+    error_version: &Arc<AtomicU64>,
 ) {
     let container_name = {
         let processes = processes.lock().unwrap();
@@ -1190,17 +1322,37 @@ fn refresh_docker_status_inner(
                 .eq_ignore_ascii_case("true");
 
             let mut updated = false;
+            let mut should_schedule_restart = false;
             {
                 let mut processes = processes.lock().unwrap();
                 if let Some(state) = processes.get_mut(id) {
-                    let next_status = if is_running {
-                        ProcessStatus::Running
+                    if is_running {
+                        if state.status != ProcessStatus::Running {
+                            state.status = ProcessStatus::Running;
+                            updated = true;
+                        }
+                    } else if state.config.auto_restart
+                        && !state.suppress_restart_once
+                        && state.status == ProcessStatus::Running
+                    {
+                        state
+                            .logs
+                            .push("[Container stopped unexpectedly. Restarting...]".to_string());
+                        state.status = ProcessStatus::Starting;
+                        should_schedule_restart = true;
+                        updated = true;
                     } else {
-                        ProcessStatus::Stopped
-                    };
+                        if state.status != ProcessStatus::Stopped {
+                            state.status = ProcessStatus::Stopped;
+                            updated = true;
+                        }
+                        if state.suppress_restart_once {
+                            state.suppress_restart_once = false;
+                        }
+                    }
 
-                    if state.status != next_status {
-                        state.status = next_status;
+                    if is_running && state.suppress_restart_once {
+                        state.suppress_restart_once = false;
                         updated = true;
                     }
                 }
@@ -1208,6 +1360,15 @@ fn refresh_docker_status_inner(
 
             if updated {
                 bump_event(event_tx, event_version);
+            }
+            if should_schedule_restart {
+                schedule_managed_restart(
+                    id.to_string(),
+                    processes.clone(),
+                    event_tx.clone(),
+                    event_version.clone(),
+                    error_version.clone(),
+                );
             }
         }
     }
