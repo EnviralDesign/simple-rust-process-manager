@@ -903,6 +903,19 @@ impl ProcessManager {
             .unwrap_or_default()
     }
 
+    pub fn get_recent_logs(&self, id: &str, limit: usize) -> Option<Vec<String>> {
+        let processes = self.processes.lock().unwrap();
+        processes.get(id).map(|state| {
+            let start = state.logs.len().saturating_sub(limit);
+            state.logs[start..].to_vec()
+        })
+    }
+
+    pub fn get_log_count(&self, id: &str) -> Option<usize> {
+        let processes = self.processes.lock().unwrap();
+        processes.get(id).map(|state| state.logs.len())
+    }
+
     pub fn list_processes(&self) -> Vec<ProcessRuntimeSnapshot> {
         let processes = self.processes.lock().unwrap();
         let mut snapshots: Vec<_> = processes

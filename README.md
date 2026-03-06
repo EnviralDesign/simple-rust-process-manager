@@ -116,6 +116,7 @@ Read endpoints:
 - `GET /health`
 - `GET /processes`
 - `GET /processes/{id}`
+- `GET /processes/{id}/logs?limit=N`
 - `GET /topology`
 
 Control endpoints:
@@ -131,6 +132,7 @@ Notes:
 
 - The API binds only to `127.0.0.1`
 - Use stable process `id` values, not display names, for per-process actions
+- Use `GET /processes/{id}/logs?limit=N` to read the last N log lines for one component; default is 200 and max is 1000
 - Control calls are fire-and-poll: after a `POST`, poll `GET /processes` or `GET /health`
 - `Copy Agent Skill` copies a text block that includes the current host, port, endpoint topology, and known process ids
 

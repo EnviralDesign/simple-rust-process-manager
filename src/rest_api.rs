@@ -6,19 +6,21 @@ use std::sync::{
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 
 use crate::config::RemoteControlConfig;
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessRuntimeSnapshot};
 
 pub const REST_HOST: &str = "127.0.0.1";
+const DEFAULT_LOG_LIMIT: usize = 200;
+const MAX_LOG_LIMIT: usize = 1_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RestServerState {
@@ -183,6 +185,7 @@ impl RestServerController {
             .route("/health", get(health))
             .route("/processes", get(list_processes))
             .route("/processes/{id}", get(get_process))
+            .route("/processes/{id}/logs", get(get_process_logs))
             .route("/processes/{id}/start", post(start_process))
             .route("/processes/{id}/stop", post(stop_process))
             .route("/processes/{id}/restart", post(restart_process))
@@ -313,6 +316,21 @@ struct EndpointDoc {
     description: &'static str,
 }
 
+#[derive(Deserialize)]
+struct LogQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ProcessLogsResponse {
+    ok: bool,
+    process_id: String,
+    limit: usize,
+    returned_lines: usize,
+    total_available_lines: usize,
+    lines: Vec<String>,
+}
+
 async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
@@ -342,6 +360,45 @@ async fn get_process(State(state): State<ApiState>, Path(id): Path<String>) -> i
         )
             .into_response(),
     }
+}
+
+async fn get_process_logs(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(query): Query<LogQuery>,
+) -> impl IntoResponse {
+    let limit = normalize_log_limit(query.limit);
+    let total_available_lines = match state.manager.get_log_count(&id) {
+        Some(count) => count,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    ok: false,
+                    message: format!("Unknown process id '{}'", id),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let lines = state
+        .manager
+        .get_recent_logs(&id, limit)
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(ProcessLogsResponse {
+            ok: true,
+            process_id: id,
+            limit,
+            returned_lines: lines.len(),
+            total_available_lines,
+            lines,
+        }),
+    )
+        .into_response()
 }
 
 async fn start_stack(State(state): State<ApiState>) -> Json<AckResponse> {
@@ -404,6 +461,12 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
             },
             EndpointDoc {
                 method: "GET",
+                path: "/processes/{id}/logs?limit=N",
+                description:
+                    "Returns the last N log lines for one managed process. Default 200, max 1000.",
+            },
+            EndpointDoc {
+                method: "GET",
                 path: "/topology",
                 description: "Returns a self-description of the API surface.",
             },
@@ -443,9 +506,14 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
         usage_notes: vec![
             "Control endpoints are fire-and-poll. After a POST, poll GET /processes.",
             "Always target individual components by stable id, not display name.",
+            "Fetch recent output with GET /processes/{id}/logs?limit=N when an agent needs tail logs.",
             "This server binds only to 127.0.0.1 and is reachable only from the same machine.",
         ],
     })
+}
+
+fn normalize_log_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DEFAULT_LOG_LIMIT).clamp(1, MAX_LOG_LIMIT)
 }
 
 fn process_action(
@@ -523,14 +591,17 @@ pub fn build_agent_bootstrap(
         "Usage".to_string(),
         "1. Call GET /health to confirm the server is reachable.".to_string(),
         "2. Call GET /processes to discover process ids and current statuses.".to_string(),
-        "3. Use POST /stack/start, /stack/stop, or /stack/restart for the full stack.".to_string(),
-        "4. Use POST /processes/{id}/start, /stop, or /restart for a single component.".to_string(),
-        "5. After any POST, poll GET /processes until the desired state is visible.".to_string(),
+        "3. Call GET /processes/{id}/logs?limit=200 to fetch the latest log tail for a component."
+            .to_string(),
+        "4. Use POST /stack/start, /stack/stop, or /stack/restart for the full stack.".to_string(),
+        "5. Use POST /processes/{id}/start, /stop, or /restart for a single component.".to_string(),
+        "6. After any POST, poll GET /processes until the desired state is visible.".to_string(),
         String::new(),
         "Endpoint Topology".to_string(),
         "- GET /health".to_string(),
         "- GET /processes".to_string(),
         "- GET /processes/{id}".to_string(),
+        "- GET /processes/{id}/logs?limit=N".to_string(),
         "- GET /topology".to_string(),
         "- POST /stack/start".to_string(),
         "- POST /stack/stop".to_string(),
