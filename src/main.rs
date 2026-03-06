@@ -5,10 +5,12 @@
 
 mod config;
 mod process_manager;
+mod rest_api;
 
-use config::{AppConfig, ProcessConfig, ProcessType};
+use config::{AppConfig, ProcessConfig, ProcessType, RemoteControlConfig};
 use dioxus::prelude::*;
 use process_manager::{ProcessManager, ProcessStatus};
+use rest_api::{build_agent_bootstrap, RestServerController, RestServerSnapshot};
 use std::sync::Arc;
 
 // CSS Styles embedded in the app
@@ -98,7 +100,59 @@ body {
 
 .header-actions {
     display: flex;
+    align-items: center;
     gap: 6px;
+}
+
+.header-status-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-right: 4px;
+    margin-right: 4px;
+    border-right: 1px solid var(--border);
+}
+
+.header-api-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    letter-spacing: 0.2px;
+}
+
+.header-api-badge.active {
+    background: var(--success-soft);
+    color: #86efac;
+    border-color: rgba(34, 197, 94, 0.45);
+}
+
+.header-api-badge.inactive {
+    background: rgba(136, 146, 160, 0.16);
+    color: var(--text-muted);
+    border-color: rgba(136, 146, 160, 0.35);
+}
+
+.header-api-badge.pending {
+    background: var(--warning-soft);
+    color: #fcd34d;
+    border-color: rgba(251, 191, 36, 0.45);
+}
+
+.header-api-badge.error {
+    background: var(--danger-soft);
+    color: #fca5a5;
+    border-color: rgba(248, 113, 113, 0.45);
+}
+
+.header-api-address {
+    font-family: 'Cascadia Mono', 'Consolas', monospace;
+    font-size: 10px;
+    opacity: 0.9;
 }
 
 .header-separator {
@@ -588,6 +642,12 @@ body {
     margin-top: 4px;
 }
 
+.form-error {
+    font-size: 11px;
+    color: #fca5a5;
+    margin-top: 6px;
+}
+
 .form-checkbox-row {
     display: flex;
     align-items: center;
@@ -718,6 +778,8 @@ struct AppState {
     show_add_modal: Signal<bool>,
     show_edit_modal: Signal<Option<String>>,
     show_confirm_delete: Signal<Option<String>>,
+    show_rest_settings: Signal<bool>,
+    rest_status: Signal<RestServerSnapshot>,
     // Force re-render counter for log updates
     refresh_counter: Signal<u64>,
 }
@@ -756,6 +818,21 @@ impl NewProcessForm {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct RestSettingsForm {
+    enabled: bool,
+    port: String,
+}
+
+impl RestSettingsForm {
+    fn from_config(config: &RemoteControlConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            port: config.port.to_string(),
+        }
+    }
+}
+
 #[component]
 fn App() -> Element {
     // Initialize state
@@ -764,6 +841,7 @@ fn App() -> Element {
     let show_add_modal = use_signal(|| false);
     let show_edit_modal: Signal<Option<String>> = use_signal(|| None);
     let show_confirm_delete: Signal<Option<String>> = use_signal(|| None);
+    let show_rest_settings = use_signal(|| false);
     let mut refresh_counter = use_signal(|| 0u64);
     let last_error_version = use_signal(|| 0u64);
     let window = dioxus::desktop::use_window();
@@ -774,6 +852,12 @@ fn App() -> Element {
         let _ = GLOBAL_MANAGER.set(m.clone());
         m
     });
+    let rest_controller = use_hook({
+        let manager = manager.clone();
+        move || Arc::new(RestServerController::new(manager.clone()))
+    });
+    let initial_rest_port = config.read().remote_control.port;
+    let rest_status = use_signal(move || RestServerSnapshot::disabled(initial_rest_port));
 
     // Initialize manager with config
     use_effect({
@@ -782,6 +866,17 @@ fn App() -> Element {
         move || {
             manager.init_from_config(&config.processes);
             manager.start_background_tasks();
+        }
+    });
+
+    // Apply REST server configuration when the project config changes.
+    use_effect({
+        let rest_controller = rest_controller.clone();
+        let mut rest_status = rest_status;
+        move || {
+            let snapshot = config.read().clone();
+            rest_controller.apply_config(snapshot.stack_name, snapshot.remote_control);
+            rest_status.set(rest_controller.snapshot());
         }
     });
 
@@ -796,6 +891,23 @@ fn App() -> Element {
                         break;
                     }
                     refresh_counter.set(*rx.borrow());
+                }
+            }
+        }
+    });
+
+    // Subscribe to REST controller status changes.
+    use_future({
+        let rest_controller = rest_controller.clone();
+        let mut rest_status = rest_status;
+        move || {
+            let mut rx = rest_controller.subscribe();
+            async move {
+                loop {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                    rest_status.set(rx.borrow().clone());
                 }
             }
         }
@@ -831,7 +943,9 @@ fn App() -> Element {
     // Setup cleanup on window close via drop guard
     use_drop({
         let manager = manager.clone();
+        let rest_controller = rest_controller.clone();
         move || {
+            rest_controller.shutdown();
             manager.stop_non_docker();
         }
     });
@@ -842,6 +956,8 @@ fn App() -> Element {
         show_add_modal,
         show_edit_modal,
         show_confirm_delete,
+        show_rest_settings,
+        rest_status,
         refresh_counter,
     };
 
@@ -868,6 +984,9 @@ fn App() -> Element {
             if state.show_confirm_delete.read().is_some() {
                 DeleteConfirmModal { state }
             }
+            if *state.show_rest_settings.read() {
+                RestSettingsModal { state }
+            }
         }
     }
 }
@@ -877,6 +996,17 @@ fn get_manager() -> Arc<ProcessManager> {
         .get()
         .expect("Manager not initialized")
         .clone()
+}
+
+fn persist_config(config: Signal<AppConfig>) {
+    let _ = config.read().save();
+}
+
+fn copy_text_to_clipboard(text: &str) {
+    if let Ok(payload) = serde_json::to_string(text) {
+        let script = format!("window.navigator.clipboard.writeText({payload}).catch(() => {{}});");
+        dioxus::document::eval(&script);
+    }
 }
 
 fn wait_for_process_stop(manager: &ProcessManager, id: &str) {
@@ -898,8 +1028,18 @@ fn Header(state: AppState) -> Element {
     let mut config = state.config;
     let mut editing_stack_name = use_signal(|| false);
     let mut temp_stack_name = use_signal(|| String::new());
+    let mut copy_feedback = use_signal(|| false);
+    let mut show_rest_settings = state.show_rest_settings;
+    let rest_status = state.rest_status.read().clone();
 
-    let stack_name = config.read().stack_name.clone();
+    let app_config = config.read().clone();
+    let stack_name = app_config.stack_name.clone();
+    let remote_control = app_config.remote_control.clone();
+    let copy_label = if *copy_feedback.read() {
+        "Copied"
+    } else {
+        "Copy Agent Skill"
+    };
 
     rsx! {
         header {
@@ -923,7 +1063,7 @@ fn Header(state: AppState) -> Element {
                                 let new_name = temp_stack_name.read().clone();
                                 if !new_name.is_empty() {
                                     config.write().stack_name = new_name;
-                                    let _ = config.read().save();
+                                    persist_config(config);
                                 }
                                 editing_stack_name.set(false);
                             } else if e.key() == Key::Escape {
@@ -934,7 +1074,7 @@ fn Header(state: AppState) -> Element {
                             let new_name = temp_stack_name.read().clone();
                             if !new_name.is_empty() {
                                 config.write().stack_name = new_name;
-                                let _ = config.read().save();
+                                persist_config(config);
                             }
                             editing_stack_name.set(false);
                         },
@@ -953,6 +1093,56 @@ fn Header(state: AppState) -> Element {
             }
             div {
                 class: "header-actions",
+                div {
+                    class: "header-status-group",
+                    span {
+                        class: "header-api-badge {rest_status.badge_class()}",
+                        title: rest_status.message.clone().unwrap_or_else(|| {
+                            format!("Local API status: {}", rest_status.status_label())
+                        }),
+                        "Local API {rest_status.status_label()}"
+                        span { class: "header-api-address", "{rest_status.address()}" }
+                    }
+                    button {
+                        class: "btn btn-small",
+                        title: if remote_control.enabled { "Disable Local API" } else { "Enable Local API" },
+                        onclick: move |_| {
+                            let next_enabled = !config.read().remote_control.enabled;
+                            config.write().remote_control.enabled = next_enabled;
+                            persist_config(config);
+                        },
+                        if remote_control.enabled { "Disable API" } else { "Enable API" }
+                    }
+                    button {
+                        class: "btn btn-small",
+                        title: "Edit Local API settings",
+                        onclick: move |_| {
+                            show_rest_settings.set(true);
+                        },
+                        "API Settings"
+                    }
+                    button {
+                        class: "btn btn-small",
+                        title: "Copy a bootstrap payload for an AI agent",
+                        onclick: move |_| {
+                            let current = config.read().clone();
+                            let payload = build_agent_bootstrap(
+                                &current.stack_name,
+                                &current.remote_control,
+                                &state.rest_status.read().clone(),
+                                &get_manager().list_processes(),
+                            );
+                            copy_text_to_clipboard(&payload);
+                            copy_feedback.set(true);
+
+                            spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                copy_feedback.set(false);
+                            });
+                        },
+                        "{copy_label}"
+                    }
+                }
                 button {
                     class: "btn btn-success",
                     title: "Start All",
@@ -976,6 +1166,120 @@ fn Header(state: AppState) -> Element {
                         get_manager().restart_all();
                     },
                     "Restart All"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RestSettingsModal(state: AppState) -> Element {
+    let mut show_modal = state.show_rest_settings;
+    let mut config = state.config;
+    let current_config = config.read().remote_control.clone();
+    let mut form = use_signal({
+        let current_config = current_config.clone();
+        move || RestSettingsForm::from_config(&current_config)
+    });
+    let mut validation_error = use_signal(String::new);
+
+    rsx! {
+        div {
+            class: "modal-overlay",
+            onclick: move |_| show_modal.set(false),
+            div {
+                class: "modal",
+                style: "width: 460px;",
+                onclick: |e| e.stop_propagation(),
+                div {
+                    class: "modal-header",
+                    span { class: "modal-title", "Local API Settings" }
+                    button {
+                        class: "modal-close",
+                        onclick: move |_| show_modal.set(false),
+                        "×"
+                    }
+                }
+                div {
+                    class: "modal-body",
+                    div {
+                        class: "form-group",
+                        label { class: "form-label", "Enable Local API" }
+                        div {
+                            class: "form-checkbox-row",
+                            input {
+                                class: "form-checkbox",
+                                r#type: "checkbox",
+                                checked: form.read().enabled,
+                                onchange: move |e| {
+                                    let value = e.value();
+                                    form.write().enabled = value == "true" || value == "on";
+                                }
+                            }
+                            span { "Allow localhost REST control for the stack" }
+                        }
+                        div { class: "form-hint", "This server binds only to 127.0.0.1." }
+                    }
+                    div {
+                        class: "form-group",
+                        label { class: "form-label", "Host" }
+                        input {
+                            class: "form-input",
+                            r#type: "text",
+                            value: "127.0.0.1",
+                            readonly: true,
+                        }
+                    }
+                    div {
+                        class: "form-group",
+                        label { class: "form-label", "Port" }
+                        input {
+                            class: "form-input",
+                            r#type: "number",
+                            min: "1",
+                            max: "65535",
+                            value: "{form.read().port}",
+                            oninput: move |e| {
+                                validation_error.set(String::new());
+                                form.write().port = e.value();
+                            },
+                        }
+                        div {
+                            class: "form-hint",
+                            "Choose the loopback port AI agents should target on this machine."
+                        }
+                        if !validation_error.read().is_empty() {
+                            div { class: "form-error", "{validation_error.read()}" }
+                        }
+                    }
+                }
+                div {
+                    class: "modal-footer",
+                    button {
+                        class: "btn",
+                        onclick: move |_| show_modal.set(false),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        onclick: move |_| {
+                            let port_value = form.read().port.trim().to_string();
+                            let enabled = form.read().enabled;
+
+                            let port = match port_value.parse::<u16>() {
+                                Ok(port) if port > 0 => port,
+                                _ => {
+                                    validation_error.set("Enter a valid TCP port from 1 to 65535.".to_string());
+                                    return;
+                                }
+                            };
+
+                            config.write().remote_control = RemoteControlConfig { enabled, port };
+                            persist_config(config);
+                            show_modal.set(false);
+                        },
+                        "Save"
+                    }
                 }
             }
         }

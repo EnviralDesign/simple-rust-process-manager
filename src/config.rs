@@ -6,6 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 47_821;
+
 /// Type of process being managed
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProcessType {
@@ -72,12 +74,40 @@ impl ProcessConfig {
     }
 }
 
+/// Configuration for the optional localhost REST control surface
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteControlConfig {
+    /// Whether the local REST server is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// TCP port to bind on 127.0.0.1
+    #[serde(default = "default_remote_control_port")]
+    pub port: u16,
+}
+
+impl Default for RemoteControlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_remote_control_port(),
+        }
+    }
+}
+
+fn default_remote_control_port() -> u16 {
+    DEFAULT_REMOTE_CONTROL_PORT
+}
+
 /// Root configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Name/label for this stack (to identify different instances)
     #[serde(default = "default_stack_name")]
     pub stack_name: String,
+    /// Optional localhost REST control server settings
+    #[serde(default)]
+    pub remote_control: RemoteControlConfig,
+    #[serde(default)]
     pub processes: Vec<ProcessConfig>,
 }
 
@@ -89,6 +119,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             stack_name: default_stack_name(),
+            remote_control: RemoteControlConfig::default(),
             processes: Vec::new(),
         }
     }
@@ -110,8 +141,11 @@ impl AppConfig {
 
         if path.exists() {
             match fs::read_to_string(&path) {
-                Ok(content) => match serde_json::from_str(&content) {
-                    Ok(config) => return config,
+                Ok(content) => match serde_json::from_str::<Self>(&content) {
+                    Ok(config) => {
+                        let _ = config.save();
+                        return config;
+                    }
                     Err(e) => {
                         eprintln!("Failed to parse config: {}", e);
                     }

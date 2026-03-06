@@ -9,6 +9,7 @@ use std::sync::{
 };
 use std::thread;
 
+use serde::Serialize;
 use tokio::sync::watch;
 
 use crate::config::{ProcessConfig, ProcessType};
@@ -58,6 +59,29 @@ impl ProcessState {
             job: None,
         }
     }
+}
+
+/// Serializable runtime snapshot for REST responses and other external consumers.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessRuntimeSnapshot {
+    pub id: String,
+    pub name: String,
+    pub process_type: String,
+    pub status: String,
+    pub status_detail: Option<String>,
+    pub auto_restart: bool,
+    pub command: String,
+    pub working_directory: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ProcessCounts {
+    pub total: usize,
+    pub running: usize,
+    pub stopped: usize,
+    pub starting: usize,
+    pub stopping: usize,
+    pub error: usize,
 }
 
 /// Manages all running processes
@@ -879,6 +903,41 @@ impl ProcessManager {
             .unwrap_or_default()
     }
 
+    pub fn list_processes(&self) -> Vec<ProcessRuntimeSnapshot> {
+        let processes = self.processes.lock().unwrap();
+        let mut snapshots: Vec<_> = processes
+            .values()
+            .map(process_snapshot_from_state)
+            .collect();
+        snapshots.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        snapshots
+    }
+
+    pub fn get_process_snapshot(&self, id: &str) -> Option<ProcessRuntimeSnapshot> {
+        let processes = self.processes.lock().unwrap();
+        processes.get(id).map(process_snapshot_from_state)
+    }
+
+    pub fn get_counts(&self) -> ProcessCounts {
+        let processes = self.processes.lock().unwrap();
+        let mut counts = ProcessCounts {
+            total: processes.len(),
+            ..ProcessCounts::default()
+        };
+
+        for state in processes.values() {
+            match &state.status {
+                ProcessStatus::Running => counts.running += 1,
+                ProcessStatus::Stopped => counts.stopped += 1,
+                ProcessStatus::Starting => counts.starting += 1,
+                ProcessStatus::Stopping => counts.stopping += 1,
+                ProcessStatus::Error(_) => counts.error += 1,
+            }
+        }
+
+        counts
+    }
+
     /// Check and update docker container status
     #[allow(dead_code)]
     pub fn refresh_docker_status(&self, id: &str) {
@@ -889,6 +948,31 @@ impl ProcessManager {
             &self.event_version,
             &self.error_version,
         );
+    }
+}
+
+fn process_snapshot_from_state(state: &ProcessState) -> ProcessRuntimeSnapshot {
+    let (status, status_detail) = status_parts(&state.status);
+
+    ProcessRuntimeSnapshot {
+        id: state.config.id.clone(),
+        name: state.config.name.clone(),
+        process_type: state.config.process_type.to_string(),
+        status,
+        status_detail,
+        auto_restart: state.config.auto_restart,
+        command: state.config.command.clone(),
+        working_directory: state.config.working_directory.clone(),
+    }
+}
+
+fn status_parts(status: &ProcessStatus) -> (String, Option<String>) {
+    match status {
+        ProcessStatus::Stopped => ("Stopped".to_string(), None),
+        ProcessStatus::Running => ("Running".to_string(), None),
+        ProcessStatus::Starting => ("Starting".to_string(), None),
+        ProcessStatus::Stopping => ("Stopping".to_string(), None),
+        ProcessStatus::Error(message) => ("Error".to_string(), Some(message.clone())),
     }
 }
 
