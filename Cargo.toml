@@ -6,6 +6,7 @@ description = "A simple process manager for development environments"
 authors = ["Developer"]
 
 [dependencies]
+arboard = "3.6"
 axum = { version = "0.8", features = ["json"] }
 dioxus = { version = "0.6", features = ["desktop"] }
 serde = { version = "1.0", features = ["derive"] }

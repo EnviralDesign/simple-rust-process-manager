@@ -1002,11 +1002,12 @@ fn persist_config(config: Signal<AppConfig>) {
     let _ = config.read().save();
 }
 
-fn copy_text_to_clipboard(text: &str) {
-    if let Ok(payload) = serde_json::to_string(text) {
-        let script = format!("window.navigator.clipboard.writeText({payload}).catch(() => {{}});");
-        dioxus::document::eval(&script);
-    }
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|err| format!("Clipboard unavailable: {}", err))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|err| format!("Failed to set clipboard text: {}", err))
 }
 
 fn wait_for_process_stop(manager: &ProcessManager, id: &str) {
@@ -1132,13 +1133,16 @@ fn Header(state: AppState) -> Element {
                                 &state.rest_status.read().clone(),
                                 &get_manager().list_processes(),
                             );
-                            copy_text_to_clipboard(&payload);
-                            copy_feedback.set(true);
+                            if copy_text_to_clipboard(&payload).is_ok() {
+                                copy_feedback.set(true);
 
-                            spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                    copy_feedback.set(false);
+                                });
+                            } else {
                                 copy_feedback.set(false);
-                            });
+                            }
                         },
                         "{copy_label}"
                     }

@@ -18,6 +18,8 @@ A fast, no-nonsense process manager built with Rust + Dioxus. Start whole stacks
 - **Error Attention**: Flashes the taskbar icon on new errors when the app is unfocused
 - **Managed Restart (Per Entry)**: Opt-in restart when a process/container goes down unexpectedly
 - **Portable Configuration**: JSON config file lives next to the executable for easy portability
+- **Local REST Control API**: Optional loopback-only control surface for stack-wide and per-process actions
+- **Agent Bootstrap Copy**: Copy a ready-to-paste AI agent skill block with the current host, port, endpoints, and process ids
 - **Global Controls**: Start All, Stop All, Restart All buttons for quick environment setup
 - **Graceful Shutdown**: Regular processes are killed on app close; Docker containers persist
 
@@ -27,7 +29,7 @@ A fast, no-nonsense process manager built with Rust + Dioxus. Start whole stacks
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/simple-rust-process-manager.git
+git clone https://github.com/EnviralDesign/simple-rust-process-manager.git
 cd simple-rust-process-manager
 
 # Build release version
@@ -39,7 +41,7 @@ cargo build --release
 
 ### Pre-built Binaries
 
-Check the [Releases](https://github.com/yourusername/simple-rust-process-manager/releases) page for pre-built binaries.
+Check the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/releases) page for pre-built binaries.
 
 ## Usage
 
@@ -57,7 +59,12 @@ Check the [Releases](https://github.com/yourusername/simple-rust-process-manager
    - Use the play/stop/restart/edit/delete buttons on each process card
    - Use global controls in the header for batch operations
 
-4. **Docker Containers**: For Docker entries, specify the container name. The manager will use `docker start/stop/restart` commands.
+4. **Local API**:
+   - Use the `Enable API` / `Disable API` control in the header to turn the localhost REST server on or off
+   - Click `API Settings` to edit the port; the host is always fixed to `127.0.0.1`
+   - Click `Copy Agent Skill` to copy a bootstrap payload for an AI engineer or agent
+
+5. **Docker Containers**: For Docker entries, specify the container name. The manager will use `docker start/stop/restart` commands.
 
 ## Command Notes (Direct Spawn)
 
@@ -70,6 +77,11 @@ The `processes.json` file structure:
 
 ```json
 {
+  "stack_name": "My Stack",
+  "remote_control": {
+    "enabled": false,
+    "port": 47821
+  },
   "processes": [
     {
       "id": "uuid-here",
@@ -77,7 +89,8 @@ The `processes.json` file structure:
       "command": "npm run dev",
       "working_directory": "C:/projects/my-app/frontend",
       "process_type": "Process",
-      "auto_start": false
+      "auto_start": false,
+      "auto_restart": true
     },
     {
       "id": "uuid-here",
@@ -85,11 +98,41 @@ The `processes.json` file structure:
       "command": "my-postgres-container",
       "working_directory": "",
       "process_type": "Docker",
-      "auto_start": false
+      "auto_start": false,
+      "auto_restart": false
     }
   ]
 }
 ```
+
+Existing `processes.json` files from older versions are migrated automatically on startup. The new `remote_control` object is additive, so replacing the EXE does not require recreating your stack definition.
+
+## Local REST API
+
+When enabled, the manager starts a loopback-only HTTP server on `127.0.0.1:{port}`.
+
+Read endpoints:
+
+- `GET /health`
+- `GET /processes`
+- `GET /processes/{id}`
+- `GET /topology`
+
+Control endpoints:
+
+- `POST /stack/start`
+- `POST /stack/stop`
+- `POST /stack/restart`
+- `POST /processes/{id}/start`
+- `POST /processes/{id}/stop`
+- `POST /processes/{id}/restart`
+
+Notes:
+
+- The API binds only to `127.0.0.1`
+- Use stable process `id` values, not display names, for per-process actions
+- Control calls are fire-and-poll: after a `POST`, poll `GET /processes` or `GET /health`
+- `Copy Agent Skill` copies a text block that includes the current host, port, endpoint topology, and known process ids
 
 ## Keyboard Shortcuts
 
