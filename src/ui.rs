@@ -17,24 +17,24 @@ use crate::config::{AppConfig, ProcessConfig, ProcessType, RemoteControlConfig};
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
 use crate::rest_api::{self, build_agent_bootstrap, RestServerController, RestServerSnapshot};
 
-const SHELL_BG: Color32 = Color32::from_rgb(30, 31, 34);
-const BODY_BG: Color32 = Color32::from_rgb(16, 18, 21);
-const PANEL_BG: Color32 = Color32::from_rgb(21, 23, 27);
-const PANEL_BG_ACTIVE: Color32 = Color32::from_rgb(32, 35, 40);
-const PANEL_BG_SOFT: Color32 = Color32::from_rgb(25, 28, 33);
-const BORDER: Color32 = Color32::from_rgb(50, 53, 59);
-const TEXT_MAIN: Color32 = Color32::from_rgb(230, 232, 236);
-const TEXT_MUTED: Color32 = Color32::from_rgb(143, 149, 158);
-const TEXT_SOFT: Color32 = Color32::from_rgb(171, 177, 186);
+const SHELL_BG: Color32 = Color32::from_rgb(26, 26, 26);
+const BODY_BG: Color32 = Color32::from_rgb(16, 16, 16);
+const PANEL_BG: Color32 = Color32::from_rgb(36, 36, 36);
+const PANEL_BG_ACTIVE: Color32 = Color32::from_rgb(45, 45, 45);
+const PANEL_BG_SOFT: Color32 = Color32::from_rgb(32, 32, 32);
+const BORDER: Color32 = Color32::from_rgb(45, 45, 45);
+const TEXT_MAIN: Color32 = Color32::from_rgb(230, 230, 230);
+const TEXT_MUTED: Color32 = Color32::from_rgb(140, 140, 140);
+const TEXT_SOFT: Color32 = Color32::from_rgb(180, 180, 180);
 const RUNNING: Color32 = Color32::from_rgb(85, 184, 122);
 const WARNING: Color32 = Color32::from_rgb(214, 153, 77);
 const DANGER: Color32 = Color32::from_rgb(210, 95, 95);
 const STOPPED: Color32 = Color32::from_rgb(112, 118, 126);
-const LOG_BG: Color32 = Color32::from_rgb(11, 13, 16);
+const LOG_BG: Color32 = Color32::from_rgb(20, 20, 20);
 const ACCENT_SOFT: Color32 = Color32::from_rgb(86, 102, 126);
-const SIDEBAR_WIDTH: f32 = 264.0;
+const SIDEBAR_WIDTH: f32 = 240.0;
 const UI_LOG_LIMIT: usize = 1000;
-const WINDOW_CORNER_RADIUS: u8 = 8;
+const WINDOW_CORNER_RADIUS: u8 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptionSyncMode {
@@ -83,7 +83,7 @@ impl RuntimeToggles {
             present: PresentProfile::AutoNoVsync,
             vsync: false,
             run_and_return: false,
-            caption_sync: CaptionSyncMode::Startup,
+            caption_sync: CaptionSyncMode::Off,
             diagnostics: false,
         };
 
@@ -962,17 +962,6 @@ impl ProcessManagerApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            shell_monogram(ui, "PM");
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("Process Manager")
-                                    .color(TEXT_MAIN)
-                                    .size(21.0)
-                                    .strong(),
-                            );
-                            ui.add_space(10.0);
-                            ui.label(RichText::new("|").color(TEXT_MUTED));
-                            ui.add_space(8.0);
                             if self.editing_stack_name {
                                 let response = ui.add_sized(
                                     [200.0, 28.0],
@@ -1065,10 +1054,23 @@ impl ProcessManagerApp {
             .frame(
                 egui::Frame::default()
                     .fill(self.shell_bg)
-                    .inner_margin(egui::Margin::symmetric(10, 12))
+                    .inner_margin(egui::Margin::same(12))
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    shell_monogram(ui, "PM");
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Process Manager")
+                            .color(TEXT_MAIN)
+                            .size(16.0)
+                            .strong(),
+                    );
+                });
+                
+                ui.add_space(20.0);
+
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("PROCESSES")
@@ -1159,22 +1161,21 @@ impl ProcessManagerApp {
     }
 
     fn draw_empty_state(&self, ui: &mut Ui) {
-        ui.add_space(34.0);
         ui.with_layout(
             Layout::centered_and_justified(egui::Direction::TopDown),
             |ui| {
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("Select a process to view logs")
-                            .color(TEXT_SOFT)
-                            .size(22.0)
+                        RichText::new("Let's build")
+                            .color(TEXT_MAIN)
+                            .size(32.0)
                             .strong(),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(12.0);
                     ui.label(
-                        RichText::new("The left rail stays quiet until you choose a component.")
+                        RichText::new("Select a process or add a new one.")
                             .color(TEXT_MUTED)
-                            .size(13.0),
+                            .size(16.0),
                     );
                 });
             },
@@ -1199,13 +1200,7 @@ impl ProcessManagerApp {
         let mut action_delete = false;
 
         egui::Frame::default()
-            .fill(self.shell_bg)
-            .corner_radius(CornerRadius {
-                nw: WINDOW_CORNER_RADIUS,
-                ne: 0,
-                sw: 0,
-                se: 0,
-            })
+            .fill(Color32::TRANSPARENT)
             .stroke(Stroke::NONE)
             .inner_margin(egui::Margin::symmetric(18, 14))
             .show(ui, |ui| {
@@ -1244,7 +1239,7 @@ impl ProcessManagerApp {
             });
 
         egui::Frame::default()
-            .fill(BODY_BG)
+            .fill(Color32::TRANSPARENT)
             .inner_margin(egui::Margin::symmetric(16, 14))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1593,8 +1588,8 @@ impl eframe::App for ProcessManagerApp {
         }
         ctx.request_repaint_after(Duration::from_millis(16));
 
-        self.draw_header(ctx);
         self.draw_sidebar(ctx);
+        self.draw_header(ctx);
         self.draw_content(ctx);
         self.draw_process_dialog(ctx);
         self.draw_rest_settings_dialog(ctx);
@@ -1618,21 +1613,19 @@ fn configure_visuals(ctx: &Context) {
     visuals.window_fill = PANEL_BG;
     visuals.extreme_bg_color = BODY_BG;
     visuals.faint_bg_color = PANEL_BG;
-    visuals.widgets.noninteractive.bg_fill = PANEL_BG_SOFT;
+    visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_SOFT);
-    visuals.widgets.inactive.bg_fill = PANEL_BG_SOFT;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_black_alpha(0));
+    visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.widgets.hovered.bg_fill = PANEL_BG_ACTIVE;
-    visuals.widgets.hovered.bg_stroke =
-        Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, 20));
+    visuals.widgets.hovered.bg_fill = Color32::from_rgba_premultiplied(255, 255, 255, 15);
+    visuals.widgets.hovered.bg_stroke = Stroke::NONE;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.widgets.active.bg_fill = PANEL_BG_ACTIVE;
-    visuals.widgets.active.bg_stroke =
-        Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, 24));
+    visuals.widgets.active.bg_fill = Color32::from_rgba_premultiplied(255, 255, 255, 20);
+    visuals.widgets.active.bg_stroke = Stroke::NONE;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.selection.bg_fill = Color32::from_rgb(55, 60, 68);
+    visuals.selection.bg_fill = Color32::from_rgba_premultiplied(255, 255, 255, 25);
     visuals.selection.stroke = Stroke::NONE;
     visuals.window_shadow.color = Color32::from_black_alpha(90);
     ctx.set_visuals(visuals);
@@ -1714,19 +1707,14 @@ fn chrome_button(
     accent: Option<Color32>,
     min_size: Vec2,
 ) -> egui::Response {
-    let fill = accent
-        .map(|color| Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 56))
-        .unwrap_or(Color32::from_rgba_premultiplied(255, 255, 255, 10));
-    let stroke_color = accent
-        .map(|color| Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 168))
-        .unwrap_or(Color32::from_rgba_premultiplied(255, 255, 255, 18));
-    let text_color = TEXT_MAIN;
-
+    let text_color = match accent {
+        Some(color) => color,
+        None => TEXT_MAIN,
+    };
+    
     ui.add(
-        Button::new(RichText::new(label).color(text_color).size(12.0))
-            .fill(fill)
-            .stroke(Stroke::new(1.0, stroke_color))
-            .corner_radius(8.0)
+        Button::new(RichText::new(label).color(text_color).size(12.5))
+            .corner_radius(4.0)
             .min_size(min_size),
     )
 }
@@ -1780,53 +1768,45 @@ fn draw_process_row(
     selected: bool,
 ) -> egui::Response {
     let fill = if selected {
-        PANEL_BG_ACTIVE
+        Color32::from_rgba_premultiplied(255, 255, 255, 20)
     } else {
         Color32::TRANSPARENT
-    };
-    let stroke = if selected {
-        Color32::from_rgba_premultiplied(255, 255, 255, 24)
-    } else {
-        Color32::from_rgba_premultiplied(255, 255, 255, 12)
     };
 
     let inner = egui::Frame::default()
         .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(10, 9))
+        .stroke(Stroke::NONE)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.set_min_height(18.0);
             ui.horizontal(|ui| {
-                status_dot(ui, status_color(status, ui.ctx()), 5.0);
-                type_glyph(ui, &process.process_type);
-                ui.add_space(2.0);
+                status_dot(ui, status_color(status, ui.ctx()), 4.0);
+                ui.add_space(6.0);
                 ui.label(
                     RichText::new(&process.name)
-                        .color(TEXT_MAIN)
-                        .size(14.0)
-                        .strong(),
+                        .color(if selected { TEXT_MAIN } else { TEXT_MUTED })
+                        .size(13.5),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if process.auto_restart {
-                        ui.label(RichText::new("A").color(TEXT_MUTED).monospace().size(11.0));
+                        ui.label(RichText::new("A").color(TEXT_MUTED).size(10.0));
                     }
                 });
             });
         });
 
-    let response = ui.interact(
+    let mut response = ui.interact(
         inner.response.rect,
         ui.make_persistent_id((&process.id, "process_row")),
         egui::Sense::click(),
     );
 
     if response.hovered() && !selected {
-        ui.painter().rect_stroke(
+        ui.painter().rect_filled(
             response.rect,
-            10.0,
-            Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, 18)),
-            egui::StrokeKind::Middle,
+            4.0,
+            Color32::from_rgba_premultiplied(255, 255, 255, 8),
         );
     }
 
