@@ -8,7 +8,7 @@ authors = ["Developer"]
 [dependencies]
 arboard = "3.6"
 axum = { version = "0.8", features = ["json"] }
-dioxus = { version = "0.6", features = ["desktop"] }
+eframe = { version = "0.33", default-features = false, features = ["wgpu"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full", "process"] }
@@ -19,11 +19,12 @@ dirs = "5.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+wgpu = { version = "27", features = ["dx12", "vulkan"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "thin"
 
 [build-dependencies]
 winresource = "0.1"

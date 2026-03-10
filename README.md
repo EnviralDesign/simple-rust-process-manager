@@ -1,6 +1,6 @@
 # Simple Rust Process Manager
 
-A fast, no-nonsense process manager built with Rust + Dioxus. Start whole stacks in one click, watch logs live, and actually stop everything cleanly (even messy toolchains like npm/uv). It's small, snappy, and built for real dev workflows.
+A fast, no-nonsense process manager built with Rust + egui/eframe. Start whole stacks in one click, watch logs live, and actually stop everything cleanly (even messy toolchains like npm/uv). It's small, snappy, and built for real dev workflows.
 
 ![Process Manager](https://img.shields.io/badge/rust-1.70+-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -160,7 +160,7 @@ cargo build --release
 
 ## Architecture
 
-- **Dioxus Desktop**: Native GUI framework for Rust
+- **egui / eframe**: Native immediate-mode desktop GUI for Rust
 - **Tokio**: Async runtime for process management
 - **Serde**: JSON serialization for config persistence
 - **portable-pty**: Cross-platform PTY support for log streaming

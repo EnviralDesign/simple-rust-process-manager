@@ -84,15 +84,6 @@ impl RestServerSnapshot {
         }
     }
 
-    pub fn badge_class(&self) -> &'static str {
-        match self.state {
-            RestServerState::Disabled => "inactive",
-            RestServerState::Starting => "pending",
-            RestServerState::Running => "active",
-            RestServerState::Error => "error",
-        }
-    }
-
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
@@ -132,10 +123,6 @@ impl RestServerController {
             generation: Arc::new(AtomicU64::new(0)),
             snapshot_tx,
         }
-    }
-
-    pub fn subscribe(&self) -> watch::Receiver<RestServerSnapshot> {
-        self.snapshot_tx.subscribe()
     }
 
     pub fn snapshot(&self) -> RestServerSnapshot {

@@ -84,6 +84,14 @@ pub struct ProcessCounts {
     pub error: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct UiRuntimeSnapshot {
+    pub counts: ProcessCounts,
+    pub statuses: HashMap<String, ProcessStatus>,
+    pub selected_logs: Vec<String>,
+    pub selected_log_count: usize,
+}
+
 /// Manages all running processes
 pub struct ProcessManager {
     pub processes: Arc<Mutex<HashMap<String, ProcessState>>>,
@@ -91,6 +99,7 @@ pub struct ProcessManager {
     event_version: Arc<AtomicU64>,
     error_version: Arc<AtomicU64>,
     background_started: AtomicBool,
+    has_docker_entries: Arc<AtomicBool>,
 }
 
 impl Default for ProcessManager {
@@ -108,11 +117,8 @@ impl ProcessManager {
             event_version: Arc::new(AtomicU64::new(0)),
             error_version: Arc::new(AtomicU64::new(0)),
             background_started: AtomicBool::new(false),
+            has_docker_entries: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub fn subscribe(&self) -> watch::Receiver<u64> {
-        self.event_tx.subscribe()
     }
 
     pub fn error_version(&self) -> u64 {
@@ -121,6 +127,17 @@ impl ProcessManager {
 
     fn notify(&self) {
         bump_event(&self.event_tx, &self.event_version);
+    }
+
+    pub fn current_version(&self) -> u64 {
+        self.event_version.load(Ordering::Relaxed)
+    }
+
+    fn update_docker_polling_flag_locked(&self, processes: &HashMap<String, ProcessState>) {
+        let has_docker = processes
+            .values()
+            .any(|state| state.config.process_type == ProcessType::Docker);
+        self.has_docker_entries.store(has_docker, Ordering::Relaxed);
     }
 
     pub fn start_background_tasks(&self) {
@@ -132,8 +149,14 @@ impl ProcessManager {
         let event_tx = self.event_tx.clone();
         let event_version = self.event_version.clone();
         let error_version = self.error_version.clone();
+        let has_docker_entries = self.has_docker_entries.clone();
 
         thread::spawn(move || loop {
+            if !has_docker_entries.load(Ordering::Relaxed) {
+                thread::sleep(std::time::Duration::from_secs(2));
+                continue;
+            }
+
             thread::sleep(std::time::Duration::from_millis(750));
 
             let docker_ids: Vec<String> = {
@@ -165,12 +188,14 @@ impl ProcessManager {
                 processes.insert(config.id.clone(), ProcessState::new(config.clone()));
             }
         }
+        self.update_docker_polling_flag_locked(&processes);
     }
 
     /// Add a new process
     pub fn add_process(&self, config: ProcessConfig) {
         let mut processes = self.processes.lock().unwrap();
         processes.insert(config.id.clone(), ProcessState::new(config));
+        self.update_docker_polling_flag_locked(&processes);
         self.notify();
     }
 
@@ -179,6 +204,7 @@ impl ProcessManager {
         let mut processes = self.processes.lock().unwrap();
         if let Some(state) = processes.get_mut(&config.id) {
             state.config = config;
+            self.update_docker_polling_flag_locked(&processes);
             self.notify();
             true
         } else {
@@ -191,6 +217,7 @@ impl ProcessManager {
         self.stop_process(id);
         let mut processes = self.processes.lock().unwrap();
         processes.remove(id);
+        self.update_docker_polling_flag_locked(&processes);
         self.notify();
     }
 
@@ -894,15 +921,6 @@ impl ProcessManager {
         processes.get(id).map(|s| s.status.clone())
     }
 
-    /// Get logs for a process
-    pub fn get_logs(&self, id: &str) -> Vec<String> {
-        let processes = self.processes.lock().unwrap();
-        processes
-            .get(id)
-            .map(|s| s.logs.clone())
-            .unwrap_or_default()
-    }
-
     pub fn get_recent_logs(&self, id: &str, limit: usize) -> Option<Vec<String>> {
         let processes = self.processes.lock().unwrap();
         processes.get(id).map(|state| {
@@ -949,6 +967,46 @@ impl ProcessManager {
         }
 
         counts
+    }
+
+    pub fn build_ui_snapshot(
+        &self,
+        selected_id: Option<&str>,
+        log_limit: usize,
+    ) -> UiRuntimeSnapshot {
+        let processes = self.processes.lock().unwrap();
+        let mut counts = ProcessCounts {
+            total: processes.len(),
+            ..ProcessCounts::default()
+        };
+        let mut statuses = HashMap::with_capacity(processes.len());
+        let mut selected_logs = Vec::new();
+        let mut selected_log_count = 0usize;
+
+        for (id, state) in processes.iter() {
+            statuses.insert(id.clone(), state.status.clone());
+
+            match &state.status {
+                ProcessStatus::Running => counts.running += 1,
+                ProcessStatus::Stopped => counts.stopped += 1,
+                ProcessStatus::Starting => counts.starting += 1,
+                ProcessStatus::Stopping => counts.stopping += 1,
+                ProcessStatus::Error(_) => counts.error += 1,
+            }
+
+            if selected_id == Some(id.as_str()) {
+                selected_log_count = state.logs.len();
+                let start = state.logs.len().saturating_sub(log_limit);
+                selected_logs = state.logs[start..].to_vec();
+            }
+        }
+
+        UiRuntimeSnapshot {
+            counts,
+            statuses,
+            selected_logs,
+            selected_log_count,
+        }
     }
 
     /// Check and update docker container status
@@ -1288,27 +1346,6 @@ fn supported_extensions() -> Vec<String> {
 #[cfg(windows)]
 fn is_supported_extension(ext: &str) -> bool {
     matches!(ext, "exe" | "com" | "cmd" | "bat")
-}
-
-#[cfg(windows)]
-fn build_cmdline(script_path: &str, args: &[String]) -> String {
-    let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(quote_cmd_arg(script_path));
-    parts.extend(args.iter().map(|arg| quote_cmd_arg(arg)));
-    parts.join(" ")
-}
-
-#[cfg(windows)]
-fn quote_cmd_arg(arg: &str) -> String {
-    if arg.is_empty() {
-        return "\"\"".to_string();
-    }
-    let needs_quotes = arg.chars().any(|c| c.is_whitespace() || c == '"');
-    if !needs_quotes {
-        return arg.to_string();
-    }
-    let escaped = arg.replace('"', "\\\"");
-    format!("\"{}\"", escaped)
 }
 
 fn parse_command(command: &str) -> Result<(String, Vec<String>), String> {

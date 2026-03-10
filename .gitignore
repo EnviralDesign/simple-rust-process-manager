@@ -16,3 +16,5 @@ Thumbs.db
 # Process manager config (user-specific)
 # Uncomment if you don't want to track the config
 # processes.json
+
+.tmp*
