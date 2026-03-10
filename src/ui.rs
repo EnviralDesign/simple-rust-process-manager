@@ -34,7 +34,7 @@ const LOG_BG: Color32 = Color32::from_rgb(20, 20, 20);
 const ACCENT_SOFT: Color32 = Color32::from_rgb(86, 102, 126);
 const SIDEBAR_WIDTH: f32 = 240.0;
 const UI_LOG_LIMIT: usize = 1000;
-const WINDOW_CORNER_RADIUS: u8 = 16;
+const WINDOW_CORNER_RADIUS: u8 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptionSyncMode {
@@ -329,6 +329,7 @@ pub struct ProcessManagerApp {
     process_dialog: Option<ProcessDialog>,
     delete_process_id: Option<String>,
     rest_settings_open: bool,
+    global_settings_tab: usize,
     rest_settings_form: RestSettingsForm,
     rest_settings_error: Option<String>,
     editing_stack_name: bool,
@@ -400,6 +401,7 @@ impl ProcessManagerApp {
             process_dialog: None,
             delete_process_id: None,
             rest_settings_open: false,
+            global_settings_tab: 0,
             rest_settings_form: RestSettingsForm::from_config(&RemoteControlConfig::default()),
             rest_settings_error: None,
             editing_stack_name: false,
@@ -507,6 +509,7 @@ impl ProcessManagerApp {
     }
 
     fn open_rest_settings(&mut self) {
+        self.stack_name_buffer = self.config.stack_name.clone();
         self.rest_settings_form = RestSettingsForm::from_config(&self.config.remote_control);
         self.rest_settings_error = None;
         self.rest_settings_open = true;
@@ -623,13 +626,18 @@ impl ProcessManagerApp {
             }
         };
 
+        let trimmed = self.stack_name_buffer.trim();
+        if !trimmed.is_empty() && trimmed != self.config.stack_name {
+            self.config.stack_name = trimmed.to_string();
+        }
+
         self.config.remote_control.enabled = self.rest_settings_form.enabled;
         self.config.remote_control.port = parsed_port;
         self.persist_config();
         self.apply_rest_config();
         self.rest_settings_open = false;
         self.rest_settings_error = None;
-        self.set_banner("Local API settings saved.");
+        self.set_banner("Global settings saved.");
     }
 
     fn delete_process(&mut self, process_id: &str) {
@@ -948,8 +956,6 @@ impl ProcessManagerApp {
 
     fn draw_header(&mut self, ctx: &Context) {
         let counts = self.runtime_snapshot.counts;
-        let rest_status = self.rest_snapshot();
-        let copy_label = self.copy_button_label();
 
         TopBottomPanel::top("header")
             .frame(
@@ -960,59 +966,24 @@ impl ProcessManagerApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            if self.editing_stack_name {
-                                let response = ui.add_sized(
-                                    [200.0, 28.0],
-                                    TextEdit::singleline(&mut self.stack_name_buffer),
-                                );
-                                if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))
-                                {
-                                    self.save_stack_name();
-                                }
-                                if ui.input(|i| i.key_pressed(Key::Escape)) {
-                                    self.editing_stack_name = false;
-                                }
-                            } else {
-                                let stack_button = ui.add(
-                                    Button::new(
-                                        RichText::new(&self.config.stack_name)
-                                            .color(TEXT_SOFT)
-                                            .size(18.0),
-                                    )
-                                    .fill(Color32::TRANSPARENT)
-                                    .stroke(Stroke::NONE),
-                                );
-                                if stack_button.clicked() {
-                                    self.stack_name_buffer = self.config.stack_name.clone();
-                                    self.editing_stack_name = true;
-                                }
-                            }
-                        });
-
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(stack_summary(&counts))
-                                    .color(TEXT_MUTED)
-                                    .size(12.5),
-                            );
-                            if let Some(message) = self.visible_banner() {
-                                ui.add_space(10.0);
-                                ui.label(RichText::new(message).color(TEXT_SOFT).size(12.5));
-                            }
-                        });
-                    });
+                    ui.label(
+                        RichText::new(stack_summary(&counts))
+                            .color(TEXT_MUTED)
+                            .size(12.5),
+                    );
+                    if let Some(message) = self.visible_banner() {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(message).color(TEXT_SOFT).size(12.5));
+                    }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if subtle_action_button(ui, "Restart All", Some(WARNING)).clicked() {
+                        if subtle_action_button(ui, "🔄", None).on_hover_text("Restart All").clicked() {
                             self.manager.restart_all();
                         }
-                        if subtle_action_button(ui, "Stop All", Some(DANGER)).clicked() {
+                        if subtle_action_button(ui, "⏹", None).on_hover_text("Stop All").clicked() {
                             self.manager.stop_all();
                         }
-                        if subtle_action_button(ui, "Start All", Some(RUNNING)).clicked() {
+                        if subtle_action_button(ui, "▶", None).on_hover_text("Start All").clicked() {
                             self.manager.start_all();
                         }
 
@@ -1020,27 +991,15 @@ impl ProcessManagerApp {
                         ui.separator();
                         ui.add_space(8.0);
 
-                        if shell_button(ui, copy_label).clicked() {
+                        if subtle_action_button(ui, "📋", None).on_hover_text("Copy Agent Skill").clicked() {
                             self.copy_agent_skill();
                         }
-                        if shell_button(ui, "API Settings").clicked() {
-                            self.open_rest_settings();
-                        }
-                        if shell_button(
-                            ui,
-                            if self.config.remote_control.enabled {
-                                "Disable API"
-                            } else {
-                                "Enable API"
-                            },
-                        )
-                        .clicked()
-                        {
+
+                        let api_text = format!("Local API: {}", if self.config.remote_control.enabled { "ON" } else { "OFF" });
+                        let api_color = if self.config.remote_control.enabled { RUNNING } else { TEXT_MUTED };
+                        if ui.add(Button::new(RichText::new(api_text).color(api_color).size(12.0)).frame(false)).on_hover_text("Toggle Local API").clicked() {
                             self.toggle_api_enabled();
                         }
-
-                        ui.add_space(8.0);
-                        api_status_badge(ui, &rest_status);
                     });
                 });
             });
@@ -1058,72 +1017,69 @@ impl ProcessManagerApp {
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    shell_monogram(ui, "PM");
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("Process Manager")
-                            .color(TEXT_MAIN)
-                            .size(16.0)
-                            .strong(),
-                    );
-                });
-                
-                ui.add_space(20.0);
-
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("PROCESSES")
-                            .color(TEXT_MUTED)
-                            .size(11.0)
-                            .strong(),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if chrome_button(ui, "+", None, Vec2::new(30.0, 26.0)).clicked() {
-                            self.open_add_process();
+                TopBottomPanel::bottom("global_settings_panel")
+                    .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(0, 4)))
+                    .show_inside(ui, |ui| {
+                        if ui.add(Button::new(RichText::new("⚙ Global Settings").color(TEXT_MUTED).size(13.0)).fill(Color32::TRANSPARENT)).clicked() {
+                            self.open_rest_settings();
                         }
                     });
-                });
 
-                ui.add_space(10.0);
-
-                if self.config.processes.is_empty() {
-                    ui.add_space(20.0);
-                    ui.vertical_centered(|ui| {
+                CentralPanel::default().frame(egui::Frame::default()).show_inside(ui, |ui| {
+                    ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("No processes yet")
-                                .color(TEXT_SOFT)
-                                .size(15.0),
-                        );
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new("Add one with Ctrl+N or the + button.")
+                            RichText::new("PROCESSES")
                                 .color(TEXT_MUTED)
-                                .size(12.0),
+                                .size(11.0)
+                                .strong(),
                         );
-                    });
-                    return;
-                }
-
-                ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for process in self.config.processes.clone() {
-                            let status = self
-                                .runtime_snapshot
-                                .statuses
-                                .get(&process.id)
-                                .cloned()
-                                .unwrap_or(ProcessStatus::Stopped);
-                            let is_selected =
-                                self.selected_process.as_deref() == Some(process.id.as_str());
-                            if draw_process_row(ui, &process, &status, is_selected).clicked() {
-                                self.selected_process = Some(process.id.clone());
-                                self.refresh_runtime_snapshot(true);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(Button::new(RichText::new("+").size(11.0).color(TEXT_MUTED)).fill(Color32::TRANSPARENT)).clicked() {
+                                self.open_add_process();
                             }
-                            ui.add_space(6.0);
-                        }
+                        });
                     });
+
+                    ui.add_space(10.0);
+
+                    if self.config.processes.is_empty() {
+                        ui.add_space(20.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                RichText::new("No processes yet")
+                                    .color(TEXT_SOFT)
+                                    .size(15.0),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("Add one with the + button.")
+                                    .color(TEXT_MUTED)
+                                    .size(12.0),
+                            );
+                        });
+                        return;
+                    }
+
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for process in self.config.processes.clone() {
+                                let status = self
+                                    .runtime_snapshot
+                                    .statuses
+                                    .get(&process.id)
+                                    .cloned()
+                                    .unwrap_or(ProcessStatus::Stopped);
+                                let is_selected =
+                                    self.selected_process.as_deref() == Some(process.id.as_str());
+                                if draw_process_row(ui, &process, &status, is_selected).clicked() {
+                                    self.selected_process = Some(process.id.clone());
+                                    self.refresh_runtime_snapshot(true);
+                                }
+                                ui.add_space(2.0);
+                            }
+                        });
+                });
             });
     }
 
@@ -1205,37 +1161,45 @@ impl ProcessManagerApp {
             .inner_margin(egui::Margin::symmetric(18, 14))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(&process.name)
-                                    .color(TEXT_MAIN)
-                                    .size(25.0)
-                                    .strong(),
-                            );
-                            ui.add_space(10.0);
-                            status_chip(ui, &status);
-                        });
-                        ui.add_space(7.0);
-                        ui.horizontal_wrapped(|ui| {
-                            detail_kv(ui, "Type", &process.process_type.to_string());
-                            detail_kv(ui, "Managed restart", managed_restart);
-                            detail_kv(ui, "Command", &process.command);
-                            if !process.working_directory.trim().is_empty() {
-                                detail_kv(ui, "Working dir", &process.working_directory);
-                            }
-                        });
-                    });
-
+                    ui.label(
+                        RichText::new(&process.name)
+                            .color(TEXT_MAIN)
+                            .size(24.0)
+                            .strong(),
+                    );
+                    
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        action_delete = shell_button(ui, "Delete").clicked();
-                        action_edit = shell_button(ui, "Edit").clicked();
-                        action_restart =
-                            subtle_action_button(ui, "Restart", Some(WARNING)).clicked();
-                        action_stop = subtle_action_button(ui, "Stop", Some(DANGER)).clicked();
-                        action_start = subtle_action_button(ui, "Start", Some(RUNNING)).clicked();
+                        if subtle_action_button(ui, "🗑", Some(DANGER)).on_hover_text("Delete").clicked() {
+                            action_delete = true;
+                        }
+                        if subtle_action_button(ui, "✏", None).on_hover_text("Edit").clicked() {
+                            action_edit = true;
+                        }
+                        ui.add_space(4.0);
+                        if subtle_action_button(ui, "🔄", Some(WARNING)).on_hover_text("Restart").clicked() {
+                            action_restart = true;
+                        }
+                        if subtle_action_button(ui, "⏹", Some(DANGER)).on_hover_text("Stop").clicked() {
+                            action_stop = true;
+                        }
+                        if subtle_action_button(ui, "▶", Some(RUNNING)).on_hover_text("Start").clicked() {
+                            action_start = true;
+                        }
                     });
                 });
+                
+                ui.add_space(10.0);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 2.0), egui::Sense::hover());
+                let spacing: f32 = 6.0;
+                let dash_len: f32 = 6.0;
+                let mut x = rect.left() + 4.0;
+                let end_x = rect.right() - 4.0;
+                let color = Color32::from_rgba_premultiplied(255, 255, 255, 12);
+                while x < end_x {
+                    let w = dash_len.min(end_x - x);
+                    ui.painter().hline(x..=x + w, rect.center().y, Stroke::new(1.0, color));
+                    x += dash_len + spacing;
+                }
             });
 
         egui::Frame::default()
@@ -1423,7 +1387,7 @@ impl ProcessManagerApp {
         let mut save = false;
         let mut host_text = "127.0.0.1".to_string();
 
-        Window::new("Local API Settings")
+        Window::new("Global Settings")
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
             .resizable(false)
@@ -1434,25 +1398,47 @@ impl ProcessManagerApp {
             )
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.set_width(400.0);
-                ui.checkbox(
-                    &mut self.rest_settings_form.enabled,
-                    "Enable localhost REST control",
-                );
-                ui.add_space(10.0);
-                ui.label(field_label("Host"));
-                ui.add_enabled(false, TextEdit::singleline(&mut host_text));
-                ui.add_space(10.0);
-                ui.label(field_label("Port"));
-                ui.add_sized(
-                    [180.0, 30.0],
-                    TextEdit::singleline(&mut self.rest_settings_form.port),
-                );
-                ui.label(
-                    RichText::new("The API binds only to 127.0.0.1.")
-                        .color(TEXT_MUTED)
-                        .size(11.5),
-                );
+                ui.set_width(420.0);
+                
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(self.global_settings_tab == 0, "Process Manager").clicked() {
+                        self.global_settings_tab = 0;
+                    }
+                    if ui.selectable_label(self.global_settings_tab == 1, "Local API").clicked() {
+                        self.global_settings_tab = 1;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                if self.global_settings_tab == 0 {
+                    ui.label(field_label("Stack Name"));
+                    ui.add_sized(
+                        [398.0, 30.0],
+                        TextEdit::singleline(&mut self.stack_name_buffer),
+                    );
+                    ui.add_space(40.0);
+                } else if self.global_settings_tab == 1 {
+                    ui.checkbox(
+                        &mut self.rest_settings_form.enabled,
+                        "Enable localhost REST control",
+                    );
+                    ui.add_space(10.0);
+                    ui.label(field_label("Host"));
+                    ui.add_enabled(false, TextEdit::singleline(&mut host_text));
+                    ui.add_space(10.0);
+                    ui.label(field_label("Port"));
+                    ui.add_sized(
+                        [180.0, 30.0],
+                        TextEdit::singleline(&mut self.rest_settings_form.port),
+                    );
+                    ui.label(
+                        RichText::new("The API binds only to 127.0.0.1.")
+                            .color(TEXT_MUTED)
+                            .size(11.5),
+                    );
+                }
 
                 if let Some(error) = &self.rest_settings_error {
                     ui.add_space(8.0);
@@ -1768,7 +1754,7 @@ fn draw_process_row(
     selected: bool,
 ) -> egui::Response {
     let fill = if selected {
-        Color32::from_rgba_premultiplied(255, 255, 255, 20)
+        Color32::from_rgba_premultiplied(255, 255, 255, 10)
     } else {
         Color32::TRANSPARENT
     };
@@ -1788,15 +1774,10 @@ fn draw_process_row(
                         .color(if selected { TEXT_MAIN } else { TEXT_MUTED })
                         .size(13.5),
                 );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if process.auto_restart {
-                        ui.label(RichText::new("A").color(TEXT_MUTED).size(10.0));
-                    }
-                });
             });
         });
 
-    let mut response = ui.interact(
+    let response = ui.interact(
         inner.response.rect,
         ui.make_persistent_id((&process.id, "process_row")),
         egui::Sense::click(),
@@ -1806,7 +1787,7 @@ fn draw_process_row(
         ui.painter().rect_filled(
             response.rect,
             4.0,
-            Color32::from_rgba_premultiplied(255, 255, 255, 8),
+            Color32::from_rgba_premultiplied(255, 255, 255, 4),
         );
     }
 
