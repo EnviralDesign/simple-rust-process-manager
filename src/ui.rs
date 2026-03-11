@@ -11,6 +11,8 @@ use eframe::egui::{
     Pos2, RichText, ScrollArea, SidePanel, Stroke, TextEdit, TopBottomPanel, Ui, UiBuilder, Vec2,
     ViewportBuilder, ViewportCommand, Window,
 };
+#[cfg(windows)]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::runtime::Runtime;
 
 use crate::config::{AppConfig, ProcessConfig, ProcessType, DEFAULT_LOG_ROTATION_COUNT};
@@ -363,9 +365,13 @@ pub struct ProcessManagerApp {
     last_error_version: u64,
     current_title: String,
     #[cfg(windows)]
+    root_hwnd: Option<windows_sys::Win32::Foundation::HWND>,
+    #[cfg(windows)]
     taskbar_icon_applied: bool,
     #[cfg(windows)]
-    taskbar_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
+    taskbar_big_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
+    #[cfg(windows)]
+    taskbar_small_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
     shell_bg: Color32,
     caption_color_initialized: bool,
     next_caption_probe: Instant,
@@ -441,9 +447,13 @@ impl ProcessManagerApp {
             last_error_version: 0,
             current_title,
             #[cfg(windows)]
+            root_hwnd: extract_root_hwnd(cc),
+            #[cfg(windows)]
             taskbar_icon_applied: false,
             #[cfg(windows)]
-            taskbar_icon_handle: None,
+            taskbar_big_icon_handle: None,
+            #[cfg(windows)]
+            taskbar_small_icon_handle: None,
             shell_bg: SHELL_BG,
             caption_color_initialized: false,
             next_caption_probe: Instant::now(),
@@ -1879,22 +1889,36 @@ impl ProcessManagerApp {
             return;
         }
 
-        let Some(hwnd) = find_window_by_title(&self.current_title) else {
+        let hwnd = self
+            .root_hwnd
+            .or_else(|| find_window_by_title(&self.current_title));
+        let Some(hwnd) = hwnd else {
             return;
         };
 
-        if self.taskbar_icon_handle.is_none() {
-            self.taskbar_icon_handle = load_executable_taskbar_icon_handle();
+        if self.taskbar_big_icon_handle.is_none() || self.taskbar_small_icon_handle.is_none() {
+            let (big_icon, small_icon) = load_executable_taskbar_icon_handles();
+            self.taskbar_big_icon_handle = big_icon;
+            self.taskbar_small_icon_handle = small_icon;
         }
 
-        let Some(icon_handle) = self.taskbar_icon_handle else {
+        let Some(big_icon_handle) = self.taskbar_big_icon_handle else {
             return;
         };
+        let small_icon_handle = self.taskbar_small_icon_handle;
 
-        use windows_sys::Win32::UI::WindowsAndMessaging::{ICON_BIG, SendMessageW, WM_SETICON};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GCLP_HICON, GCLP_HICONSM, ICON_BIG, ICON_SMALL, SendMessageW, SetClassLongPtrW,
+            WM_SETICON,
+        };
 
         unsafe {
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, icon_handle as isize);
+            SetClassLongPtrW(hwnd, GCLP_HICON, big_icon_handle as isize);
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, big_icon_handle as isize);
+            if let Some(small_icon_handle) = small_icon_handle {
+                SetClassLongPtrW(hwnd, GCLP_HICONSM, small_icon_handle as isize);
+                SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small_icon_handle as isize);
+            }
         }
 
         self.taskbar_icon_applied = true;
@@ -1969,7 +1993,14 @@ impl eframe::App for ProcessManagerApp {
 impl Drop for ProcessManagerApp {
     fn drop(&mut self) {
         #[cfg(windows)]
-        if let Some(icon_handle) = self.taskbar_icon_handle.take() {
+        if let Some(icon_handle) = self.taskbar_big_icon_handle.take() {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(icon_handle);
+            }
+        }
+
+        #[cfg(windows)]
+        if let Some(icon_handle) = self.taskbar_small_icon_handle.take() {
             unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(icon_handle);
             }
@@ -2685,23 +2716,41 @@ fn find_window_by_title(
 }
 
 #[cfg(windows)]
-fn load_executable_taskbar_icon_handle(
-) -> Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON> {
+fn extract_root_hwnd(
+    cc: &eframe::CreationContext<'_>,
+) -> Option<windows_sys::Win32::Foundation::HWND> {
+    let handle = cc.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn load_executable_taskbar_icon_handles() -> (
+    Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
+    Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
+) {
     use std::iter;
     use std::os::windows::ffi::OsStrExt;
 
     use windows_sys::Win32::UI::Shell::ExtractIconExW;
 
-    let exe_path = std::env::current_exe().ok()?;
+    let Some(exe_path) = std::env::current_exe().ok() else {
+        return (None, None);
+    };
     let exe_path_wide: Vec<u16> = exe_path.as_os_str().encode_wide().chain(iter::once(0)).collect();
 
     let mut large_icon = std::ptr::null_mut();
-    let extracted =
-        unsafe { ExtractIconExW(exe_path_wide.as_ptr(), 0, &mut large_icon, std::ptr::null_mut(), 1) };
+    let mut small_icon = std::ptr::null_mut();
+    let extracted = unsafe { ExtractIconExW(exe_path_wide.as_ptr(), 0, &mut large_icon, &mut small_icon, 1) };
 
-    if extracted == 0 || large_icon.is_null() {
-        None
+    if extracted == 0 {
+        (None, None)
     } else {
-        Some(large_icon)
+        (
+            (!large_icon.is_null()).then_some(large_icon),
+            (!small_icon.is_null()).then_some(small_icon),
+        )
     }
 }
