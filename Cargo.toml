@@ -17,6 +17,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 portable-pty = "0.8"
 dirs = "5.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "27", features = ["dx12", "vulkan"] }

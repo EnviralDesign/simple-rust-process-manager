@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 47_821;
+pub const DEFAULT_LOG_ROTATION_COUNT: usize = 10;
 
 /// Type of process being managed
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +54,12 @@ pub struct ProcessConfig {
     /// Whether to auto-restart when the process exits unexpectedly
     #[serde(default)]
     pub auto_restart: bool,
+    /// Whether to persist process logs to disk
+    #[serde(default)]
+    pub log_to_disk: bool,
+    /// How many session log files to keep for this process
+    #[serde(default = "default_log_rotation_count")]
+    pub log_rotation_count: usize,
 }
 
 impl ProcessConfig {
@@ -70,8 +77,14 @@ impl ProcessConfig {
             process_type,
             auto_start: false,
             auto_restart: false,
+            log_to_disk: false,
+            log_rotation_count: default_log_rotation_count(),
         }
     }
+}
+
+fn default_log_rotation_count() -> usize {
+    DEFAULT_LOG_ROTATION_COUNT
 }
 
 /// Configuration for the optional localhost REST control surface
@@ -107,6 +120,9 @@ pub struct AppConfig {
     /// Optional localhost REST control server settings
     #[serde(default)]
     pub remote_control: RemoteControlConfig,
+    /// Base directory for persisted process logs. Relative paths resolve next to the executable.
+    #[serde(default = "default_log_directory")]
+    pub log_directory: String,
     #[serde(default)]
     pub processes: Vec<ProcessConfig>,
 }
@@ -115,11 +131,16 @@ fn default_stack_name() -> String {
     "My Stack".to_string()
 }
 
+fn default_log_directory() -> String {
+    ".".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             stack_name: default_stack_name(),
             remote_control: RemoteControlConfig::default(),
+            log_directory: default_log_directory(),
             processes: Vec::new(),
         }
     }

@@ -1,7 +1,9 @@
 //! Process management logic for starting, stopping, and monitoring processes.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,6 +15,11 @@ use serde::Serialize;
 use tokio::sync::watch;
 
 use crate::config::{ProcessConfig, ProcessType};
+
+const IN_MEMORY_LOG_LIMIT: usize = 1000;
+const PROCESS_LOG_FOLDER_NAME: &str = "Process Manager logs";
+
+type SharedLogFile = Arc<Mutex<File>>;
 
 /// Status of a managed process
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +48,7 @@ pub struct ProcessState {
     pub config: ProcessConfig,
     pub status: ProcessStatus,
     pub logs: Vec<String>,
+    pub disk_log: Option<SharedLogFile>,
     pub child: Option<Child>,
     pub suppress_restart_once: bool,
     #[cfg(windows)]
@@ -53,6 +61,7 @@ impl ProcessState {
             config,
             status: ProcessStatus::Stopped,
             logs: Vec::new(),
+            disk_log: None,
             child: None,
             suppress_restart_once: false,
             #[cfg(windows)]
@@ -95,6 +104,7 @@ pub struct UiRuntimeSnapshot {
 /// Manages all running processes
 pub struct ProcessManager {
     pub processes: Arc<Mutex<HashMap<String, ProcessState>>>,
+    log_directory: Arc<Mutex<String>>,
     event_tx: watch::Sender<u64>,
     event_version: Arc<AtomicU64>,
     error_version: Arc<AtomicU64>,
@@ -113,6 +123,7 @@ impl ProcessManager {
         let (event_tx, _event_rx) = watch::channel(0u64);
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
+            log_directory: Arc::new(Mutex::new(".".to_string())),
             event_tx,
             event_version: Arc::new(AtomicU64::new(0)),
             error_version: Arc::new(AtomicU64::new(0)),
@@ -123,6 +134,11 @@ impl ProcessManager {
 
     pub fn error_version(&self) -> u64 {
         self.error_version.load(Ordering::Relaxed)
+    }
+
+    pub fn set_log_directory(&self, directory: impl Into<String>) {
+        let mut log_directory = self.log_directory.lock().unwrap();
+        *log_directory = directory.into();
     }
 
     fn notify(&self) {
@@ -150,6 +166,7 @@ impl ProcessManager {
         let event_version = self.event_version.clone();
         let error_version = self.error_version.clone();
         let has_docker_entries = self.has_docker_entries.clone();
+        let log_directory = self.log_directory.clone();
 
         thread::spawn(move || loop {
             if !has_docker_entries.load(Ordering::Relaxed) {
@@ -172,6 +189,7 @@ impl ProcessManager {
                 refresh_docker_status_inner(
                     &id,
                     &processes,
+                    &log_directory,
                     &event_tx,
                     &event_version,
                     &error_version,
@@ -225,6 +243,7 @@ impl ProcessManager {
     pub fn start_process(&self, id: &str) {
         println!("[DEBUG] start_process called with id: {}", id);
         let processes_arc = self.processes.clone();
+        let log_directory = self.log_directory.clone();
         let event_tx = self.event_tx.clone();
         let event_version = self.event_version.clone();
         let error_version = self.error_version.clone();
@@ -245,6 +264,7 @@ impl ProcessManager {
                 state.suppress_restart_once = false;
                 state.status = ProcessStatus::Starting;
                 state.logs.clear();
+                state.disk_log = None;
                 bump_event(&event_tx, &event_version);
                 state.config.clone()
             } else {
@@ -265,6 +285,7 @@ impl ProcessManager {
                     &id_owned,
                     &config,
                     processes_arc,
+                    log_directory,
                     event_tx,
                     event_version,
                     error_version,
@@ -275,6 +296,7 @@ impl ProcessManager {
                     &id_owned,
                     &config,
                     processes_arc,
+                    log_directory,
                     event_tx,
                     event_version,
                     error_version,
@@ -287,6 +309,7 @@ impl ProcessManager {
         id: &str,
         config: &ProcessConfig,
         processes_arc: Arc<Mutex<HashMap<String, ProcessState>>>,
+        log_directory: Arc<Mutex<String>>,
         event_tx: watch::Sender<u64>,
         event_version: Arc<AtomicU64>,
         error_version: Arc<AtomicU64>,
@@ -294,6 +317,7 @@ impl ProcessManager {
         let id_owned = id.to_string();
         let command = config.command.clone();
         let working_dir = config.working_directory.clone();
+        let config_clone = config.clone();
 
         thread::spawn(move || {
             println!("[DEBUG] Thread spawned for command: {}", command);
@@ -305,7 +329,7 @@ impl ProcessManager {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.clone());
-                        state.logs.push(format!("[Failed to start: {}]", e));
+                        log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
                     bump_error(&error_version);
                     bump_event(&event_tx, &event_version);
@@ -320,7 +344,7 @@ impl ProcessManager {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.clone());
-                        state.logs.push(format!("[Failed to start: {}]", e));
+                        log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
                     bump_error(&error_version);
                     bump_event(&event_tx, &event_version);
@@ -376,14 +400,38 @@ impl ProcessManager {
                     // Capture stdout
                     let stdout = child.stdout.take();
                     let stderr = child.stderr.take();
+                    let disk_log = if config_clone.log_to_disk {
+                        let base_directory = log_directory.lock().unwrap().clone();
+                        match create_disk_log_session(&base_directory, &config_clone) {
+                            Ok(file) => Some(file),
+                            Err(err) => {
+                                eprintln!(
+                                    "[WARN] Failed to initialize disk logging for '{}': {}",
+                                    config_clone.name, err
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
                     {
                         let mut processes = processes_arc.lock().unwrap();
                         if let Some(state) = processes.get_mut(&id_owned) {
                             state.status = ProcessStatus::Running;
-                            state
-                                .logs
-                                .push(format!("[Started with PID {}]", child.id()));
+                            state.disk_log = disk_log.clone();
+                            push_in_memory_log(
+                                &mut state.logs,
+                                format!("[Started with PID {}]", child.id()),
+                            );
+                            if config_clone.log_to_disk && state.disk_log.is_none() {
+                                push_in_memory_log(
+                                    &mut state.logs,
+                                    "[Disk logging unavailable. See stderr for details.]"
+                                        .to_string(),
+                                );
+                            }
                             println!("[DEBUG] Status set to Running");
                             state.child = Some(child);
                             #[cfg(windows)]
@@ -404,22 +452,8 @@ impl ProcessManager {
                         thread::spawn(move || {
                             let reader = BufReader::new(stdout);
                             for line in reader.lines().map_while(Result::ok) {
-                                let mut updated = false;
-                                let mut has_error = false;
-                                {
-                                    let mut processes = processes_clone.lock().unwrap();
-                                    if let Some(state) = processes.get_mut(&id_clone) {
-                                        state.logs.push(line);
-                                        if let Some(last) = state.logs.last() {
-                                            has_error = line_has_error(last);
-                                        }
-                                        // Keep last 1000 lines
-                                        if state.logs.len() > 1000 {
-                                            state.logs.remove(0);
-                                        }
-                                        updated = true;
-                                    }
-                                }
+                                let (updated, has_error) =
+                                    append_runtime_log(&processes_clone, &id_clone, line, false);
                                 if updated {
                                     if has_error {
                                         bump_error(&error_version);
@@ -440,20 +474,8 @@ impl ProcessManager {
                         thread::spawn(move || {
                             let reader = BufReader::new(stderr);
                             for line in reader.lines().map_while(Result::ok) {
-                                let mut updated = false;
-                                let mut has_error = false;
-                                {
-                                    let mut processes = processes_clone.lock().unwrap();
-                                    if let Some(state) = processes.get_mut(&id_clone) {
-                                        let formatted = format!("[stderr] {}", line);
-                                        has_error = line_has_error(&line);
-                                        state.logs.push(formatted);
-                                        if state.logs.len() > 1000 {
-                                            state.logs.remove(0);
-                                        }
-                                        updated = true;
-                                    }
-                                }
+                                let (updated, has_error) =
+                                    append_runtime_log(&processes_clone, &id_clone, line, true);
                                 if updated {
                                     if has_error {
                                         bump_error(&error_version);
@@ -483,14 +505,18 @@ impl ProcessManager {
                                     if let Some(ref mut child) = state.child {
                                         match child.try_wait() {
                                             Ok(Some(status)) => {
-                                                state.logs.push(format!(
-                                                    "[Process exited with: {}]",
-                                                    status
-                                                ));
+                                                log_process_state_event(
+                                                    state,
+                                                    format!("[Process exited with: {}]", status),
+                                                );
                                                 if state.config.auto_restart
                                                     && !state.suppress_restart_once
                                                 {
-                                                    state.logs.push("[Managed process went down. Restarting...]".to_string());
+                                                    log_process_state_event(
+                                                        state,
+                                                        "[Managed process went down. Restarting...]"
+                                                            .to_string(),
+                                                    );
                                                     state.status = ProcessStatus::Starting;
                                                     should_schedule_restart = true;
                                                 } else {
@@ -498,6 +524,7 @@ impl ProcessManager {
                                                 }
                                                 state.suppress_restart_once = false;
                                                 state.child = None;
+                                                state.disk_log = None;
                                                 #[cfg(windows)]
                                                 {
                                                     state.job = None;
@@ -511,6 +538,7 @@ impl ProcessManager {
                                             Err(e) => {
                                                 state.status = ProcessStatus::Error(e.to_string());
                                                 state.child = None;
+                                                state.disk_log = None;
                                                 #[cfg(windows)]
                                                 {
                                                     state.job = None;
@@ -537,6 +565,7 @@ impl ProcessManager {
                                 schedule_managed_restart(
                                     id_monitor.clone(),
                                     processes_monitor.clone(),
+                                    log_directory.clone(),
                                     event_tx.clone(),
                                     event_version.clone(),
                                     error_version.clone(),
@@ -552,7 +581,7 @@ impl ProcessManager {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.to_string());
-                        state.logs.push(format!("[Failed to start: {}]", e));
+                        log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
                     bump_error(&error_version);
                     bump_event(&event_tx, &event_version);
@@ -565,14 +594,32 @@ impl ProcessManager {
         id: &str,
         config: &ProcessConfig,
         processes_arc: Arc<Mutex<HashMap<String, ProcessState>>>,
+        log_directory: Arc<Mutex<String>>,
         event_tx: watch::Sender<u64>,
         event_version: Arc<AtomicU64>,
         error_version: Arc<AtomicU64>,
     ) {
         let id_owned = id.to_string();
         let container_name = config.command.clone();
+        let config_clone = config.clone();
 
         thread::spawn(move || {
+            let disk_log = if config_clone.log_to_disk {
+                let base_directory = log_directory.lock().unwrap().clone();
+                match create_disk_log_session(&base_directory, &config_clone) {
+                    Ok(file) => Some(file),
+                    Err(err) => {
+                        eprintln!(
+                            "[WARN] Failed to initialize disk logging for '{}': {}",
+                            config_clone.name, err
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             // Start docker container
             let mut cmd = Command::new("docker");
             cmd.args(["start", &container_name]);
@@ -587,15 +634,28 @@ impl ProcessManager {
                 Ok(output) => {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
+                        state.disk_log = disk_log.clone();
                         if output.status.success() {
                             state.status = ProcessStatus::Running;
-                            state
-                                .logs
-                                .push(format!("[Docker container '{}' started]", container_name));
+                            log_process_state_event(
+                                state,
+                                format!("[Docker container '{}' started]", container_name),
+                            );
+                            if config_clone.log_to_disk && state.disk_log.is_none() {
+                                push_in_memory_log(
+                                    &mut state.logs,
+                                    "[Disk logging unavailable. See stderr for details.]"
+                                        .to_string(),
+                                );
+                            }
                         } else {
                             let stderr = String::from_utf8_lossy(&output.stderr);
                             state.status = ProcessStatus::Error(stderr.to_string());
-                            state.logs.push(format!("[Failed to start: {}]", stderr));
+                            log_process_state_event(
+                                state,
+                                format!("[Failed to start: {}]", stderr),
+                            );
+                            state.disk_log = None;
                             bump_error(&error_version);
                         }
                     }
@@ -605,7 +665,8 @@ impl ProcessManager {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.to_string());
-                        state.logs.push(format!("[Failed to start docker: {}]", e));
+                        log_process_state_event(state, format!("[Failed to start docker: {}]", e));
+                        state.disk_log = None;
                     }
                     bump_error(&error_version);
                     bump_event(&event_tx, &event_version);
@@ -651,26 +712,30 @@ impl ProcessManager {
                 if let Some(stdout) = child.stdout.take() {
                     let reader = BufReader::new(stdout);
                     for line in reader.lines().map_while(Result::ok) {
-                        let mut updated = false;
-                        let mut has_error = false;
                         let mut should_break = false;
-                        {
+                        let (updated, has_error) = {
+                            let mut updated = false;
+                            let mut has_error = false;
                             let mut processes = processes_arc.lock().unwrap();
                             if let Some(state) = processes.get_mut(&id_owned) {
                                 if state.status != ProcessStatus::Running {
                                     should_break = true;
                                 } else {
-                                    has_error = line_has_error(&line);
-                                    state.logs.push(line);
-                                    if state.logs.len() > 1000 {
-                                        state.logs.remove(0);
+                                    let formatted = line.clone();
+                                    has_error = line_has_error(&formatted);
+                                    if let Some(file) = state.disk_log.clone() {
+                                        write_disk_log_line(&file, &formatted);
                                     }
+                                    push_in_memory_log(&mut state.logs, formatted);
                                     updated = true;
                                 }
                             } else {
                                 should_break = true;
+                                updated = false;
+                                has_error = false;
                             }
-                        }
+                            (updated, has_error)
+                        };
                         if updated {
                             if has_error {
                                 bump_error(&error_version);
@@ -763,10 +828,11 @@ impl ProcessManager {
                 if let Some(state) = processes.get_mut(&id_owned) {
                     state.child = None;
                     if let Some(err) = stop_error {
-                        state.logs.push(format!("[Stop error: {}]", err));
+                        log_process_state_event(state, format!("[Stop error: {}]", err));
                     }
-                    state.logs.push("[Process stopped]".to_string());
+                    log_process_state_event(state, "[Process stopped]".to_string());
                     state.status = ProcessStatus::Stopped;
+                    state.disk_log = None;
                 }
                 bump_event(&event_tx, &event_version);
             });
@@ -791,20 +857,22 @@ impl ProcessManager {
                     match output {
                         Ok(out) if out.status.success() => {
                             state.status = ProcessStatus::Stopped;
-                            state
-                                .logs
-                                .push(format!("[Docker container '{}' stopped]", container_name));
+                            log_process_state_event(
+                                state,
+                                format!("[Docker container '{}' stopped]", container_name),
+                            );
                         }
                         Ok(out) => {
                             let stderr = String::from_utf8_lossy(&out.stderr);
-                            state.logs.push(format!("[Stop error: {}]", stderr));
+                            log_process_state_event(state, format!("[Stop error: {}]", stderr));
                             state.status = ProcessStatus::Stopped;
                         }
                         Err(e) => {
-                            state.logs.push(format!("[Stop error: {}]", e));
+                            log_process_state_event(state, format!("[Stop error: {}]", e));
                             state.status = ProcessStatus::Stopped;
                         }
                     }
+                    state.disk_log = None;
                 }
                 bump_event(&event_tx, &event_version);
             });
@@ -1015,10 +1083,160 @@ impl ProcessManager {
         refresh_docker_status_inner(
             id,
             &self.processes,
+            &self.log_directory,
             &self.event_tx,
             &self.event_version,
             &self.error_version,
         );
+    }
+}
+
+fn append_runtime_log(
+    processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
+    process_id: &str,
+    line: String,
+    is_stderr: bool,
+) -> (bool, bool) {
+    let mut processes = processes.lock().unwrap();
+    let Some(state) = processes.get_mut(process_id) else {
+        return (false, false);
+    };
+
+    let formatted = if is_stderr {
+        format!("[stderr] {}", line)
+    } else {
+        line
+    };
+    let has_error = line_has_error(&formatted);
+
+    if let Some(file) = state.disk_log.clone() {
+        write_disk_log_line(&file, &formatted);
+    }
+    push_in_memory_log(&mut state.logs, formatted);
+
+    (true, has_error)
+}
+
+fn log_process_state_event(state: &mut ProcessState, message: String) {
+    if let Some(file) = state.disk_log.clone() {
+        write_disk_log_line(&file, &message);
+    }
+    push_in_memory_log(&mut state.logs, message);
+}
+
+fn push_in_memory_log(logs: &mut Vec<String>, line: String) {
+    logs.push(line);
+    if logs.len() > IN_MEMORY_LOG_LIMIT {
+        logs.remove(0);
+    }
+}
+
+fn write_disk_log_line(file: &SharedLogFile, line: &str) {
+    if let Ok(mut file) = file.lock() {
+        let _ = writeln!(file, "{}", line);
+        let _ = file.flush();
+    }
+}
+
+fn create_disk_log_session(
+    base_directory: &str,
+    config: &ProcessConfig,
+) -> Result<SharedLogFile, String> {
+    let process_directory = resolve_log_root(base_directory)
+        .join(PROCESS_LOG_FOLDER_NAME)
+        .join(sanitize_path_component(if config.name.trim().is_empty() {
+            &config.id
+        } else {
+            &config.name
+        }));
+
+    fs::create_dir_all(&process_directory)
+        .map_err(|err| format!("Failed to create log folder: {}", err))?;
+
+    let session_path = next_log_file_path(&process_directory);
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&session_path)
+        .map_err(|err| format!("Failed to open session log: {}", err))?;
+
+    rotate_process_logs(&process_directory, config.log_rotation_count.max(1))?;
+
+    Ok(Arc::new(Mutex::new(file)))
+}
+
+fn rotate_process_logs(process_directory: &Path, keep_count: usize) -> Result<(), String> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(process_directory)
+        .map_err(|err| format!("Failed to read log folder: {}", err))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("log"))
+        .collect();
+
+    entries.sort();
+
+    let remove_count = entries.len().saturating_sub(keep_count);
+    for path in entries.into_iter().take(remove_count) {
+        fs::remove_file(&path)
+            .map_err(|err| format!("Failed to remove old log '{}': {}", path.display(), err))?;
+    }
+
+    Ok(())
+}
+
+fn next_log_file_path(process_directory: &Path) -> PathBuf {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    let base = process_directory.join(format!("{}.log", timestamp));
+    if !base.exists() {
+        return base;
+    }
+
+    for suffix in 1..1000 {
+        let candidate = process_directory.join(format!("{}_{}.log", timestamp, suffix));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    process_directory.join(format!(
+        "{}_{}.log",
+        timestamp,
+        chrono::Local::now().timestamp_millis()
+    ))
+}
+
+fn resolve_log_root(directory: &str) -> PathBuf {
+    let trimmed = directory.trim();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    if trimmed.is_empty() || trimmed == "." {
+        return exe_dir;
+    }
+
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        path
+    } else {
+        exe_dir.join(path)
+    }
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            ch if ch.is_control() => '_',
+            _ => ch,
+        })
+        .collect();
+    let trimmed = sanitized.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "Unnamed Process".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -1063,6 +1281,7 @@ fn bump_error(error_version: &Arc<AtomicU64>) {
 fn schedule_managed_restart(
     id: String,
     processes: Arc<Mutex<HashMap<String, ProcessState>>>,
+    log_directory: Arc<Mutex<String>>,
     event_tx: watch::Sender<u64>,
     event_version: Arc<AtomicU64>,
     error_version: Arc<AtomicU64>,
@@ -1106,6 +1325,7 @@ fn schedule_managed_restart(
                 &id,
                 &config,
                 processes.clone(),
+                log_directory.clone(),
                 event_tx.clone(),
                 event_version.clone(),
                 error_version.clone(),
@@ -1114,6 +1334,7 @@ fn schedule_managed_restart(
                 &id,
                 &config,
                 processes.clone(),
+                log_directory.clone(),
                 event_tx.clone(),
                 event_version.clone(),
                 error_version.clone(),
@@ -1423,6 +1644,7 @@ fn kill_process_tree(pid: u32) -> Result<(), String> {
 fn refresh_docker_status_inner(
     id: &str,
     processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
+    log_directory: &Arc<Mutex<String>>,
     event_tx: &watch::Sender<u64>,
     event_version: &Arc<AtomicU64>,
     error_version: &Arc<AtomicU64>,
@@ -1469,9 +1691,10 @@ fn refresh_docker_status_inner(
                         && !state.suppress_restart_once
                         && state.status == ProcessStatus::Running
                     {
-                        state
-                            .logs
-                            .push("[Container stopped unexpectedly. Restarting...]".to_string());
+                        log_process_state_event(
+                            state,
+                            "[Container stopped unexpectedly. Restarting...]".to_string(),
+                        );
                         state.status = ProcessStatus::Starting;
                         should_schedule_restart = true;
                         updated = true;
@@ -1499,6 +1722,7 @@ fn refresh_docker_status_inner(
                 schedule_managed_restart(
                     id.to_string(),
                     processes.clone(),
+                    log_directory.clone(),
                     event_tx.clone(),
                     event_version.clone(),
                     error_version.clone(),
