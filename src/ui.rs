@@ -248,8 +248,11 @@ fn wgpu_configuration(
 }
 
 fn load_icon_data() -> Option<egui::IconData> {
+    use image::imageops::FilterType;
+
     let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
         .ok()?
+        .resize(64, 64, FilterType::Lanczos3)
         .to_rgba8();
     let (width, height) = image.dimensions();
 
@@ -359,6 +362,10 @@ pub struct ProcessManagerApp {
     stick_logs_to_bottom: bool,
     last_error_version: u64,
     current_title: String,
+    #[cfg(windows)]
+    taskbar_icon_applied: bool,
+    #[cfg(windows)]
+    taskbar_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
     shell_bg: Color32,
     caption_color_initialized: bool,
     next_caption_probe: Instant,
@@ -433,6 +440,10 @@ impl ProcessManagerApp {
             stick_logs_to_bottom: true,
             last_error_version: 0,
             current_title,
+            #[cfg(windows)]
+            taskbar_icon_applied: false,
+            #[cfg(windows)]
+            taskbar_icon_handle: None,
             shell_bg: SHELL_BG,
             caption_color_initialized: false,
             next_caption_probe: Instant::now(),
@@ -1861,6 +1872,36 @@ impl ProcessManagerApp {
             ));
         }
     }
+
+    #[cfg(windows)]
+    fn ensure_windows_taskbar_icon(&mut self) {
+        if self.taskbar_icon_applied {
+            return;
+        }
+
+        let Some(hwnd) = find_window_by_title(&self.current_title) else {
+            return;
+        };
+
+        if self.taskbar_icon_handle.is_none() {
+            self.taskbar_icon_handle = load_executable_taskbar_icon_handle();
+        }
+
+        let Some(icon_handle) = self.taskbar_icon_handle else {
+            return;
+        };
+
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ICON_BIG, SendMessageW, WM_SETICON};
+
+        unsafe {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, icon_handle as isize);
+        }
+
+        self.taskbar_icon_applied = true;
+    }
+
+    #[cfg(not(windows))]
+    fn ensure_windows_taskbar_icon(&mut self) {}
 }
 
 impl eframe::App for ProcessManagerApp {
@@ -1868,6 +1909,7 @@ impl eframe::App for ProcessManagerApp {
         let update_started = Instant::now();
         self.ensure_valid_selection();
         self.update_title(ctx);
+        self.ensure_windows_taskbar_icon();
         let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
         let (viewport_pos, viewport_size) = ctx.input(|input| {
             let viewport = input.viewport();
@@ -1926,6 +1968,13 @@ impl eframe::App for ProcessManagerApp {
 
 impl Drop for ProcessManagerApp {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(icon_handle) = self.taskbar_icon_handle.take() {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(icon_handle);
+            }
+        }
+
         self.rest_controller.shutdown();
         self.manager.stop_non_docker();
     }
@@ -2550,18 +2599,12 @@ fn append_diagnostics_line(log_path: &mut Option<PathBuf>, line: &str) {
 #[cfg(windows)]
 fn sample_windows_title_bar_color(window_title: &str) -> Option<Color32> {
     use std::collections::HashMap;
-    use std::iter;
 
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
-    let title_wide: Vec<u16> = window_title.encode_utf16().chain(iter::once(0)).collect();
-
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), title_wide.as_ptr()) };
-    if hwnd.is_null() {
-        return None;
-    }
+    let hwnd = find_window_by_title(window_title)?;
 
     let mut rect = RECT {
         left: 0,
@@ -2622,4 +2665,43 @@ fn sample_windows_title_bar_color(window_title: &str) -> Option<Color32> {
     let b = (packed & 0xFF) as u8;
 
     Some(Color32::from_rgb(r, g, b))
+}
+
+#[cfg(windows)]
+fn find_window_by_title(
+    window_title: &str,
+) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use std::iter;
+
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+    let title_wide: Vec<u16> = window_title.encode_utf16().chain(iter::once(0)).collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title_wide.as_ptr()) };
+    if hwnd.is_null() {
+        None
+    } else {
+        Some(hwnd)
+    }
+}
+
+#[cfg(windows)]
+fn load_executable_taskbar_icon_handle(
+) -> Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON> {
+    use std::iter;
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::UI::Shell::ExtractIconExW;
+
+    let exe_path = std::env::current_exe().ok()?;
+    let exe_path_wide: Vec<u16> = exe_path.as_os_str().encode_wide().chain(iter::once(0)).collect();
+
+    let mut large_icon = std::ptr::null_mut();
+    let extracted =
+        unsafe { ExtractIconExW(exe_path_wide.as_ptr(), 0, &mut large_icon, std::ptr::null_mut(), 1) };
+
+    if extracted == 0 || large_icon.is_null() {
+        None
+    } else {
+        Some(large_icon)
+    }
 }
