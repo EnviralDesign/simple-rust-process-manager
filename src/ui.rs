@@ -17,20 +17,20 @@ use crate::config::{AppConfig, ProcessConfig, ProcessType, RemoteControlConfig};
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
 use crate::rest_api::{self, build_agent_bootstrap, RestServerController, RestServerSnapshot};
 
-const SHELL_BG: Color32 = Color32::from_rgb(26, 26, 26);
-const BODY_BG: Color32 = Color32::from_rgb(16, 16, 16);
-const PANEL_BG: Color32 = Color32::from_rgb(36, 36, 36);
-const PANEL_BG_ACTIVE: Color32 = Color32::from_rgb(45, 45, 45);
-const PANEL_BG_SOFT: Color32 = Color32::from_rgb(32, 32, 32);
-const BORDER: Color32 = Color32::from_rgb(45, 45, 45);
-const TEXT_MAIN: Color32 = Color32::from_rgb(230, 230, 230);
-const TEXT_MUTED: Color32 = Color32::from_rgb(140, 140, 140);
+const SHELL_BG: Color32 = Color32::from_rgb(30, 30, 30); // Sidebar/header shell — gets overridden by caption probe
+const BODY_BG: Color32 = Color32::from_rgb(15, 15, 17); // Content inset — always darker than shell
+const PANEL_BG: Color32 = Color32::from_rgb(26, 26, 29); // Dialogs, raised surfaces
+const PANEL_BG_ACTIVE: Color32 = Color32::from_rgb(37, 37, 41);
+const PANEL_BG_SOFT: Color32 = Color32::from_rgb(37, 37, 41);
+const BORDER: Color32 = Color32::from_rgb(45, 45, 48);
+const TEXT_MAIN: Color32 = Color32::from_rgb(237, 237, 237); // #EDEDED
+const TEXT_MUTED: Color32 = Color32::from_rgb(136, 136, 136); // #888888
 const TEXT_SOFT: Color32 = Color32::from_rgb(180, 180, 180);
 const RUNNING: Color32 = Color32::from_rgb(85, 184, 122);
 const WARNING: Color32 = Color32::from_rgb(214, 153, 77);
 const DANGER: Color32 = Color32::from_rgb(210, 95, 95);
 const STOPPED: Color32 = Color32::from_rgb(112, 118, 126);
-const LOG_BG: Color32 = Color32::from_rgb(20, 20, 20);
+const LOG_BG: Color32 = Color32::from_rgb(10, 10, 12); // Slightly darker than body for log area depth
 const ACCENT_SOFT: Color32 = Color32::from_rgb(86, 102, 126);
 const SIDEBAR_WIDTH: f32 = 240.0;
 const UI_LOG_LIMIT: usize = 1000;
@@ -961,43 +961,55 @@ impl ProcessManagerApp {
             .frame(
                 egui::Frame::default()
                     .fill(self.shell_bg)
-                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+
                     ui.label(
                         RichText::new(stack_summary(&counts))
                             .color(TEXT_MUTED)
-                            .size(12.5),
+                            .size(12.0),
                     );
                     if let Some(message) = self.visible_banner() {
-                        ui.add_space(10.0);
-                        ui.label(RichText::new(message).color(TEXT_SOFT).size(12.5));
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(message).color(TEXT_SOFT).size(12.0));
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if subtle_action_button(ui, "🔄", None).on_hover_text("Restart All").clicked() {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+
+                        // Group 1: Global process controls
+                        if subtle_action_button(ui, "⟳ Restart All", None).clicked() {
                             self.manager.restart_all();
                         }
-                        if subtle_action_button(ui, "⏹", None).on_hover_text("Stop All").clicked() {
+                        if subtle_action_button(ui, "■ Stop All", None).clicked() {
                             self.manager.stop_all();
                         }
-                        if subtle_action_button(ui, "▶", None).on_hover_text("Start All").clicked() {
+                        if subtle_action_button(ui, "▶ Start All", Some(RUNNING)).clicked() {
                             self.manager.start_all();
                         }
 
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
+                        ui.add_space(4.0);
+                        let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 18.0), egui::Sense::hover());
+                        ui.painter().vline(sep_rect.center().x, sep_rect.y_range(), Stroke::new(1.0, Color32::from_white_alpha(15)));
+                        ui.add_space(4.0);
 
-                        if subtle_action_button(ui, "📋", None).on_hover_text("Copy Agent Skill").clicked() {
+                        // Group 2: Utilities
+                        if subtle_action_button(ui, "📋 Copy Agent Skill", None).clicked() {
                             self.copy_agent_skill();
                         }
 
-                        let api_text = format!("Local API: {}", if self.config.remote_control.enabled { "ON" } else { "OFF" });
+                        let api_text = format!("API: {}", if self.config.remote_control.enabled { "ON" } else { "OFF" });
                         let api_color = if self.config.remote_control.enabled { RUNNING } else { TEXT_MUTED };
-                        if ui.add(Button::new(RichText::new(api_text).color(api_color).size(12.0)).frame(false)).on_hover_text("Toggle Local API").clicked() {
+                        if ui.add(
+                            Button::new(RichText::new(api_text).color(api_color).size(12.0))
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::new(1.0, Color32::from_white_alpha(15)))
+                                .corner_radius(6.0)
+                        ).on_hover_text("Toggle Local API").clicked() {
                             self.toggle_api_enabled();
                         }
                     });
@@ -1034,7 +1046,7 @@ impl ProcessManagerApp {
                                 .strong(),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.add(Button::new(RichText::new("+").size(11.0).color(TEXT_MUTED)).fill(Color32::TRANSPARENT)).clicked() {
+                            if ui.add(Button::new(RichText::new("＋ Add").size(11.0).color(TEXT_MUTED)).fill(Color32::TRANSPARENT)).clicked() {
                                 self.open_add_process();
                             }
                         });
@@ -1158,48 +1170,79 @@ impl ProcessManagerApp {
         egui::Frame::default()
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::NONE)
-            .inner_margin(egui::Margin::symmetric(18, 14))
+            .inner_margin(egui::Margin::symmetric(22, 16))
             .show(ui, |ui| {
+                // Row 1: Title + status chip + action buttons
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(&process.name)
                             .color(TEXT_MAIN)
-                            .size(24.0)
+                            .size(22.0)
                             .strong(),
                     );
+                    ui.add_space(8.0);
+                    status_chip(ui, &status);
                     
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if subtle_action_button(ui, "🗑", Some(DANGER)).on_hover_text("Delete").clicked() {
+                        if subtle_action_button(ui, "✕ Delete", Some(DANGER)).clicked() {
                             action_delete = true;
                         }
-                        if subtle_action_button(ui, "✏", None).on_hover_text("Edit").clicked() {
+                        if subtle_action_button(ui, "⚙ Edit", None).clicked() {
                             action_edit = true;
                         }
                         ui.add_space(4.0);
-                        if subtle_action_button(ui, "🔄", Some(WARNING)).on_hover_text("Restart").clicked() {
+                        if subtle_action_button(ui, "⟳ Restart", Some(WARNING)).clicked() {
                             action_restart = true;
                         }
-                        if subtle_action_button(ui, "⏹", Some(DANGER)).on_hover_text("Stop").clicked() {
+                        if subtle_action_button(ui, "■ Stop", Some(TEXT_MUTED)).clicked() {
                             action_stop = true;
                         }
-                        if subtle_action_button(ui, "▶", Some(RUNNING)).on_hover_text("Start").clicked() {
+                        if subtle_action_button(ui, "▶ Start", Some(RUNNING)).clicked() {
                             action_start = true;
                         }
                     });
                 });
+
+                // Row 2: Secondary meta info — smaller, dimmer
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let type_label = match &process.process_type {
+                        ProcessType::Process => "Process",
+                        ProcessType::Docker => "Docker",
+                    };
+                    ui.label(
+                        RichText::new(format!("Type: {}", type_label))
+                            .color(TEXT_MUTED)
+                            .size(11.5),
+                    );
+                    ui.label(
+                        RichText::new("·")
+                            .color(Color32::from_white_alpha(30))
+                            .size(11.5),
+                    );
+                    ui.label(
+                        RichText::new(format!("Managed restart: {}", managed_restart))
+                            .color(TEXT_MUTED)
+                            .size(11.5),
+                    );
+                    if !process.command.is_empty() {
+                        ui.label(
+                            RichText::new("·")
+                                .color(Color32::from_white_alpha(30))
+                                .size(11.5),
+                        );
+                        ui.label(
+                            RichText::new(format!("Command: {}", &process.command))
+                                .color(TEXT_MUTED)
+                                .size(11.5),
+                        );
+                    }
+                });
                 
-                ui.add_space(10.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 2.0), egui::Sense::hover());
-                let spacing: f32 = 6.0;
-                let dash_len: f32 = 6.0;
-                let mut x = rect.left() + 4.0;
-                let end_x = rect.right() - 4.0;
-                let color = Color32::from_rgba_premultiplied(255, 255, 255, 12);
-                while x < end_x {
-                    let w = dash_len.min(end_x - x);
-                    ui.painter().hline(x..=x + w, rect.center().y, Stroke::new(1.0, color));
-                    x += dash_len + spacing;
-                }
+                // Clean solid separator
+                ui.add_space(12.0);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
+                ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, Color32::from_white_alpha(10)));
             });
 
         egui::Frame::default()
@@ -1228,8 +1271,8 @@ impl ProcessManagerApp {
 
                 egui::Frame::default()
                     .fill(LOG_BG)
-                    .stroke(Stroke::NONE)
-                    .corner_radius(12.0)
+                    .stroke(Stroke::new(1.0, Color32::from_white_alpha(8)))
+                    .corner_radius(8.0)
                     .inner_margin(egui::Margin::same(12))
                     .show(ui, |ui| {
                         if logs.is_empty() {
@@ -1595,7 +1638,7 @@ impl Drop for ProcessManagerApp {
 fn configure_visuals(ctx: &Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.override_text_color = Some(TEXT_MAIN);
-    visuals.panel_fill = BODY_BG;
+    visuals.panel_fill = SHELL_BG;
     visuals.window_fill = PANEL_BG;
     visuals.extreme_bg_color = BODY_BG;
     visuals.faint_bg_color = PANEL_BG;
@@ -1605,20 +1648,20 @@ fn configure_visuals(ctx: &Context) {
     visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgba_premultiplied(255, 255, 255, 15);
+    visuals.widgets.hovered.bg_fill = Color32::from_white_alpha(15);
     visuals.widgets.hovered.bg_stroke = Stroke::NONE;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.widgets.active.bg_fill = Color32::from_rgba_premultiplied(255, 255, 255, 20);
+    visuals.widgets.active.bg_fill = Color32::from_white_alpha(20);
     visuals.widgets.active.bg_stroke = Stroke::NONE;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.selection.bg_fill = Color32::from_rgba_premultiplied(255, 255, 255, 25);
+    visuals.selection.bg_fill = Color32::from_white_alpha(25);
     visuals.selection.stroke = Stroke::NONE;
     visuals.window_shadow.color = Color32::from_black_alpha(90);
     ctx.set_visuals(visuals);
 
     ctx.style_mut(|style| {
-        style.spacing.button_padding = Vec2::new(12.0, 8.0);
-        style.spacing.item_spacing = Vec2::new(10.0, 8.0);
+        style.spacing.button_padding = Vec2::new(10.0, 6.0);
+        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
         style.spacing.indent = 16.0;
     });
 }
@@ -1632,6 +1675,16 @@ fn configure_fonts(ctx: &Context) {
             .insert("Segoe UI".into(), egui::FontData::from_owned(bytes).into());
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             family.insert(0, "Segoe UI".into());
+        }
+    }
+
+    // Segoe UI Symbol provides Unicode symbols and icons that Segoe UI lacks
+    if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/seguisym.ttf") {
+        fonts
+            .font_data
+            .insert("Segoe UI Symbol".into(), egui::FontData::from_owned(bytes).into());
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            family.push("Segoe UI Symbol".into());
         }
     }
 
@@ -1661,10 +1714,10 @@ fn stack_summary(counts: &ProcessCounts) -> String {
 
 fn shell_monogram(ui: &mut Ui, text: &str) {
     egui::Frame::default()
-        .fill(Color32::from_rgba_premultiplied(255, 255, 255, 10))
+        .fill(Color32::from_white_alpha(10))
         .stroke(Stroke::new(
             1.0,
-            Color32::from_rgba_premultiplied(255, 255, 255, 16),
+            Color32::from_white_alpha(16),
         ))
         .corner_radius(7.0)
         .inner_margin(egui::Margin::symmetric(7, 4))
@@ -1700,7 +1753,9 @@ fn chrome_button(
     
     ui.add(
         Button::new(RichText::new(label).color(text_color).size(12.5))
-            .corner_radius(4.0)
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, Color32::from_white_alpha(15)))
+            .corner_radius(6.0)
             .min_size(min_size),
     )
 }
@@ -1712,18 +1767,9 @@ fn api_status_badge(ui: &mut Ui, snapshot: &RestServerSnapshot) {
         rest_api::RestServerState::Error => DANGER,
         rest_api::RestServerState::Disabled => STOPPED,
     };
-    let is_neutral = matches!(snapshot.state, rest_api::RestServerState::Disabled);
-    let fill = if is_neutral {
-        Color32::from_rgba_premultiplied(255, 255, 255, 12)
-    } else {
-        Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 30)
-    };
-    let stroke = if is_neutral {
-        Color32::from_rgba_premultiplied(255, 255, 255, 20)
-    } else {
-        color
-    };
-    let text = if is_neutral { TEXT_SOFT } else { TEXT_MAIN };
+    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 26);
+    let stroke = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 65);
+    let text = color;
 
     egui::Frame::default()
         .fill(fill)
@@ -1753,43 +1799,44 @@ fn draw_process_row(
     status: &ProcessStatus,
     selected: bool,
 ) -> egui::Response {
-    let fill = if selected {
-        Color32::from_rgba_premultiplied(255, 255, 255, 10)
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 32.0),
+        egui::Sense::click(),
+    );
+
+    let is_hovered = response.hovered();
+
+    let bg_color = if selected {
+        Color32::from_white_alpha(15)
+    } else if is_hovered {
+        Color32::from_white_alpha(8)
     } else {
         Color32::TRANSPARENT
     };
 
-    let inner = egui::Frame::default()
-        .fill(fill)
-        .stroke(Stroke::NONE)
-        .corner_radius(4.0)
-        .inner_margin(egui::Margin::symmetric(8, 6))
-        .show(ui, |ui| {
-            ui.set_min_height(18.0);
-            ui.horizontal(|ui| {
-                status_dot(ui, status_color(status, ui.ctx()), 4.0);
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(&process.name)
-                        .color(if selected { TEXT_MAIN } else { TEXT_MUTED })
-                        .size(13.5),
-                );
-            });
-        });
-
-    let response = ui.interact(
-        inner.response.rect,
-        ui.make_persistent_id((&process.id, "process_row")),
-        egui::Sense::click(),
-    );
-
-    if response.hovered() && !selected {
-        ui.painter().rect_filled(
-            response.rect,
-            4.0,
-            Color32::from_rgba_premultiplied(255, 255, 255, 4),
-        );
+    if bg_color != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 4.0, bg_color);
     }
+
+    if selected {
+        let accent_rect = egui::Rect::from_min_size(
+            rect.min + egui::vec2(2.0, 8.0),
+            egui::vec2(2.0, rect.height() - 16.0),
+        );
+        ui.painter().rect_filled(accent_rect, 1.0, TEXT_MAIN);
+    }
+
+    let inner_rect = rect.shrink2(egui::vec2(14.0, 0.0));
+    ui.scope_builder(UiBuilder::new().max_rect(inner_rect), |ui| {
+        ui.set_min_height(rect.height());
+        ui.horizontal_centered(|ui| {
+            ui.add_space(2.0);
+            status_dot(ui, status_color(status, ui.ctx()), 4.0);
+            ui.add_space(6.0);
+            let color = if selected { TEXT_MAIN } else { TEXT_MUTED };
+            ui.label(RichText::new(&process.name).color(color).size(13.5).strong());
+        });
+    });
 
     response.on_hover_text(process.command.clone())
 }
@@ -1818,18 +1865,9 @@ fn type_glyph(ui: &mut Ui, process_type: &ProcessType) {
 
 fn status_chip(ui: &mut Ui, status: &ProcessStatus) {
     let color = status_color(status, ui.ctx());
-    let is_neutral = matches!(status, ProcessStatus::Stopped);
-    let fill = if is_neutral {
-        Color32::from_rgba_premultiplied(255, 255, 255, 12)
-    } else {
-        Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 34)
-    };
-    let stroke = if is_neutral {
-        Color32::from_rgba_premultiplied(255, 255, 255, 20)
-    } else {
-        color
-    };
-    let text = if is_neutral { TEXT_SOFT } else { TEXT_MAIN };
+    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
+    let stroke = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 65);
+    let text = color;
     egui::Frame::default()
         .fill(fill)
         .stroke(Stroke::new(1.0, stroke))
