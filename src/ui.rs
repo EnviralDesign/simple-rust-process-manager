@@ -1687,6 +1687,9 @@ impl ProcessManagerApp {
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
             .resizable(false)
+            .default_size([420.0, GLOBAL_SETTINGS_HEIGHT])
+            .min_size([420.0, GLOBAL_SETTINGS_HEIGHT])
+            .max_size([420.0, GLOBAL_SETTINGS_HEIGHT])
             .fixed_size([420.0, GLOBAL_SETTINGS_HEIGHT])
             .frame(
                 egui::Frame::window(&ctx.style())
