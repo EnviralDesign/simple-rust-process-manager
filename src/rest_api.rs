@@ -84,9 +84,6 @@ impl RestServerSnapshot {
         }
     }
 
-    pub fn address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
 }
 
 struct ActiveServer {

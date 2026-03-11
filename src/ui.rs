@@ -15,13 +15,11 @@ use tokio::runtime::Runtime;
 
 use crate::config::{AppConfig, ProcessConfig, ProcessType, DEFAULT_LOG_ROTATION_COUNT};
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
-use crate::rest_api::{self, build_agent_bootstrap, RestServerController, RestServerSnapshot};
+use crate::rest_api::{build_agent_bootstrap, RestServerController, RestServerSnapshot};
 
 const SHELL_BG: Color32 = Color32::from_rgb(30, 30, 30); // Sidebar/header shell — gets overridden by caption probe
 const BODY_BG: Color32 = Color32::from_rgb(24, 24, 24); // Content inset — neutral gray like Codex main pane
 const PANEL_BG: Color32 = Color32::from_rgb(26, 26, 29); // Dialogs, raised surfaces
-const PANEL_BG_ACTIVE: Color32 = Color32::from_rgb(37, 37, 41);
-const PANEL_BG_SOFT: Color32 = Color32::from_rgb(37, 37, 41);
 const BORDER: Color32 = Color32::from_rgb(45, 45, 48);
 const TEXT_MAIN: Color32 = Color32::from_rgb(237, 237, 237); // #EDEDED
 const TEXT_MUTED: Color32 = Color32::from_rgb(136, 136, 136); // #888888
@@ -360,7 +358,6 @@ pub struct ProcessManagerApp {
     global_settings_tab: usize,
     rest_settings_form: RestSettingsForm,
     rest_settings_error: Option<String>,
-    editing_stack_name: bool,
     stack_name_buffer: String,
     banner: Option<(String, Instant)>,
     copy_feedback_until: Option<Instant>,
@@ -434,7 +431,6 @@ impl ProcessManagerApp {
             global_settings_tab: 0,
             rest_settings_form,
             rest_settings_error: None,
-            editing_stack_name: false,
             stack_name_buffer: String::new(),
             banner: None,
             copy_feedback_until: None,
@@ -479,17 +475,6 @@ impl ProcessManagerApp {
             self.banner = None;
         }
         self.banner.as_ref().map(|(message, _)| message.as_str())
-    }
-
-    fn copy_button_label(&self) -> &'static str {
-        if self
-            .copy_feedback_until
-            .is_some_and(|until| Instant::now() < until)
-        {
-            "Copied"
-        } else {
-            "Copy Agent Skill"
-        }
     }
 
     fn rest_snapshot(&self) -> RestServerSnapshot {
@@ -565,22 +550,6 @@ impl ProcessManagerApp {
             }
             Err(err) => self.set_banner(err),
         }
-    }
-
-    fn save_stack_name(&mut self) {
-        let trimmed = self.stack_name_buffer.trim();
-        if trimmed.is_empty() {
-            self.editing_stack_name = false;
-            return;
-        }
-
-        if trimmed != self.config.stack_name {
-            self.config.stack_name = trimmed.to_string();
-            self.persist_config();
-            self.apply_rest_config();
-        }
-
-        self.editing_stack_name = false;
     }
 
     fn apply_process_dialog(&mut self, dialog: ProcessDialog) {
@@ -1448,17 +1417,15 @@ impl ProcessManagerApp {
                             .monospace(),
                     );
                 } else {
-                    let row_height = 18.0;
                     let output = ScrollArea::vertical()
                         .id_salt(("process_logs", &process.id))
                         .auto_shrink([false, false])
                         .max_height(remaining_height.max(0.0))
                         .stick_to_bottom(self.stick_logs_to_bottom)
-                        .show_rows(ui, row_height, logs.len(), |ui, row_range| {
+                        .show(ui, |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
 
-                            for index in row_range {
-                                let line = &logs[index];
+                            for line in logs {
                                 let style = classify_log_line(line);
                                 ui.label(
                                     RichText::new(line)
@@ -2059,23 +2026,6 @@ fn stack_summary(counts: &ProcessCounts) -> String {
     )
 }
 
-fn shell_monogram(ui: &mut Ui, text: &str) {
-    egui::Frame::default()
-        .fill(Color32::from_white_alpha(10))
-        .stroke(Stroke::new(1.0, Color32::from_white_alpha(16)))
-        .corner_radius(7.0)
-        .inner_margin(egui::Margin::symmetric(7, 4))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(text)
-                    .color(TEXT_SOFT)
-                    .monospace()
-                    .size(11.0)
-                    .strong(),
-            );
-        });
-}
-
 fn shell_button(ui: &mut Ui, label: &str) -> egui::Response {
     chrome_button(ui, label, None, Vec2::new(0.0, 28.0))
 }
@@ -2146,39 +2096,6 @@ fn chrome_text_button(
     .inner
 }
 
-fn api_status_badge(ui: &mut Ui, snapshot: &RestServerSnapshot) {
-    let color = match snapshot.state {
-        rest_api::RestServerState::Running => RUNNING,
-        rest_api::RestServerState::Starting => WARNING,
-        rest_api::RestServerState::Error => DANGER,
-        rest_api::RestServerState::Disabled => STOPPED,
-    };
-    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 26);
-    let stroke = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 65);
-    let text = color;
-
-    egui::Frame::default()
-        .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(999.0)
-        .inner_margin(egui::Margin::symmetric(10, 6))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                status_dot(ui, color, 5.0);
-                ui.label(
-                    RichText::new(format!(
-                        "Local API {}  {}",
-                        snapshot.status_label(),
-                        snapshot.address()
-                    ))
-                    .color(text)
-                    .size(11.5)
-                    .strong(),
-                );
-            });
-        });
-}
-
 fn draw_process_row(
     ui: &mut Ui,
     process: &ProcessConfig,
@@ -2214,69 +2131,41 @@ fn draw_process_row(
     let dot_center = egui::pos2(inner_rect.min.x + 10.0, rect.center().y);
     ui.painter()
         .circle_filled(dot_center, 4.0, status_color(status, ui.ctx()));
+    let text_pos = egui::pos2(dot_center.x + 14.0, rect.center().y);
+    let font_id = FontId::proportional(13.5);
     let text_color = if selected { TEXT_MAIN } else { TEXT_MUTED };
     ui.painter().text(
-        egui::pos2(dot_center.x + 14.0, rect.center().y),
+        text_pos,
         Align2::LEFT_CENTER,
         &process.name,
-        FontId::proportional(13.5),
+        font_id.clone(),
         text_color,
     );
 
-    response.on_hover_text(process.command.clone())
-}
+    if process.auto_restart {
+        let name_width = ui.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(process.name.clone(), font_id.clone(), text_color)
+                .size()
+                .x
+        });
+        let marker_color = if selected { TEXT_SOFT } else { STOPPED };
+        ui.painter().text(
+            egui::pos2(text_pos.x + name_width, text_pos.y),
+            Align2::LEFT_CENTER,
+            " (M)",
+            font_id,
+            marker_color,
+        );
+    }
 
-fn type_glyph(ui: &mut Ui, process_type: &ProcessType) {
-    let label = match process_type {
-        ProcessType::Process => "P",
-        ProcessType::Docker => "D",
+    let hover_text = if process.auto_restart {
+        format!("{}\nManaged restart enabled", process.command)
+    } else {
+        process.command.clone()
     };
 
-    egui::Frame::default()
-        .fill(PANEL_BG)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(6.0)
-        .inner_margin(egui::Margin::symmetric(5, 1))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(label)
-                    .color(TEXT_MUTED)
-                    .monospace()
-                    .size(10.5)
-                    .strong(),
-            );
-        });
-}
-
-fn status_chip(ui: &mut Ui, status: &ProcessStatus) {
-    let color = status_color(status, ui.ctx());
-    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
-    let stroke = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 65);
-    let text = color;
-    egui::Frame::default()
-        .fill(fill)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(999.0)
-        .inner_margin(egui::Margin::symmetric(9, 5))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                status_dot(ui, color, 4.0);
-                ui.label(
-                    RichText::new(status_label(status))
-                        .color(text)
-                        .size(12.0)
-                        .strong(),
-                );
-            });
-        });
-}
-
-fn detail_kv(ui: &mut Ui, key: &str, value: &str) {
-    ui.label(
-        RichText::new(format!("{}: {}", key, value))
-            .color(TEXT_SOFT)
-            .size(12.0),
-    );
+    response.on_hover_text(hover_text)
 }
 
 fn field_label(text: &str) -> RichText {
@@ -2515,22 +2404,6 @@ fn modal_footer(ui: &mut Ui, add_actions: impl FnOnce(&mut Ui)) {
     ui.scope_builder(UiBuilder::new().max_rect(actions_rect), |ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), add_actions);
     });
-}
-
-fn status_dot(ui: &mut Ui, color: Color32, radius: f32) {
-    let desired = Vec2::splat(radius * 2.0 + 4.0);
-    let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), radius, color);
-}
-
-fn status_label(status: &ProcessStatus) -> &'static str {
-    match status {
-        ProcessStatus::Stopped => "Stopped",
-        ProcessStatus::Running => "Running",
-        ProcessStatus::Starting => "Starting",
-        ProcessStatus::Stopping => "Stopping",
-        ProcessStatus::Error(_) => "Error",
-    }
 }
 
 fn status_color(status: &ProcessStatus, ctx: &Context) -> Color32 {

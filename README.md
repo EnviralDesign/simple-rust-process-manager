@@ -1,79 +1,160 @@
 # Simple Rust Process Manager
 
-A fast, no-nonsense process manager built with Rust + egui/eframe. Start whole stacks in one click, watch logs live, and actually stop everything cleanly (even messy toolchains like npm/uv). It's small, snappy, and built for real dev workflows.
+A native desktop process manager for developers who want one place to run a stack, watch logs, restart flaky services, and stop everything cleanly.
+
+It is built for the annoying real-world cases:
+
+- mixed stacks like `npm`, `uv`, scripts, and Docker containers
+- runaway child processes that do not die when the parent exits
+- local tools that need a loopback API for agents, scripts, or automation
+- dev environments where fast feedback matters more than infrastructure theater
 
 ![Process Manager](https://img.shields.io/badge/rust-1.70+-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-![Process Manager UI](images/image1.png)
+## Why Use It
 
-## Features
+- Start your full local stack from one UI instead of juggling terminals.
+- Watch live output for the selected process without leaving the app.
+- Restart unstable services automatically with per-process managed restart.
+- Stop process trees cleanly on Windows, including messy child-process chains.
+- Mix normal commands and Docker containers in the same stack.
+- Expose an optional localhost-only REST API for tooling and AI agents.
 
-- **Process Management**: Start, stop, and restart multiple processes with a single click
-- **Entry Editing**: Update process definitions in place (no delete/recreate cycle)
-- **Real Process Tree Control (Windows)**: Uses Job Objects to kill entire trees so nothing gets orphaned
-- **Docker Integration**: Seamlessly control Docker containers alongside regular processes
-- **Live Log Streaming**: View real-time output from any managed process
-- **Status Monitoring**: Visual indicators show running/stopped state for each process
-- **Error Attention**: Flashes the taskbar icon on new errors when the app is unfocused
-- **Managed Restart (Per Entry)**: Opt-in restart when a process/container goes down unexpectedly
-- **Portable Configuration**: JSON config file lives next to the executable for easy portability
-- **Local REST Control API**: Optional loopback-only control surface for stack-wide and per-process actions
-- **Agent Bootstrap Copy**: Copy a ready-to-paste AI agent skill block with the current host, port, endpoints, and process ids
-- **Global Controls**: Start All, Stop All, Restart All buttons for quick environment setup
-- **Graceful Shutdown**: Regular processes are killed on app close; Docker containers persist
+## What It Looks Like
 
-## Installation
+### Main Workspace
+
+The main view is built for daily use: left-side process list, top-level stack controls, and live logs for the selected process.
+
+![Main Workspace](images/image1.png)
+
+Highlights visible here:
+
+- `(M)` marks entries with managed restart enabled
+- `Start All`, `Stop All`, and `Restart All` control the whole stack
+- the selected process shows live output with warning/error color differentiation
+- the header can expose a loopback API and copy an agent bootstrap payload
+
+### Edit Process
+
+Each process entry can be updated in place. You do not need to delete and recreate it to change behavior.
+
+![Edit Process](images/image2.png)
+
+This screen covers:
+
+- command and working directory changes
+- process vs Docker mode
+- managed restart
+- disk log capture and retention
+
+### Global Settings: Process Manager
+
+Stack-wide settings stay out of the way but are easy to find.
+
+![Global Settings - Process Manager](images/image3.png)
+
+This panel controls:
+
+- stack name
+- shared log directory
+- portable layout for logs next to the executable when desired
+
+### Global Settings: Local API
+
+The app can optionally expose a loopback-only control surface for local tooling.
+
+![Global Settings - Local API](images/image4.png)
+
+This panel controls:
+
+- localhost REST enable/disable
+- port selection
+- agent/tooling access without exposing the service on the network
+
+## Core Functionality
+
+### Stack Control
+
+- Start, stop, and restart the whole stack from the header.
+- Start, stop, restart, edit, or delete individual entries from the process pane.
+- Keep a mixed stack of regular commands and Docker containers in one place.
+
+### Live Logs
+
+- Stream output for the selected process in real time.
+- Visually differentiate system events, warnings, errors, and normal output.
+- Keep the log view pinned to the bottom while new lines arrive.
+
+### Resilience
+
+- Enable managed restart per entry for processes that should come back automatically.
+- On Windows, stop entire process trees with Job Objects so children are not orphaned.
+- Keep Docker behavior explicit: regular processes are shut down on app close, containers persist unless you stop them.
+
+### Configuration Without Friction
+
+- Store config in a portable `processes.json` next to the executable.
+- Edit existing entries in place.
+- Persist logs to disk per process, with configurable retention.
+- Migrate older config files forward automatically.
+
+### Tooling and Automation
+
+- Enable a localhost-only REST API for scripts, dashboards, and agents.
+- Copy an agent bootstrap block that includes host, port, endpoints, and process ids.
+- Use stable process ids for reliable external control.
+
+## Quick Start
 
 ### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/EnviralDesign/simple-rust-process-manager.git
 cd simple-rust-process-manager
-
-# Build release version
 cargo build --release
-
-# The executable will be at target/release/simple-rust-process-manager.exe (Windows)
-# or target/release/simple-rust-process-manager (Linux/macOS)
 ```
 
-### Pre-built Binaries
+Output binary:
 
-Check the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/releases) page for pre-built binaries.
+- Windows: `target/release/simple-rust-process-manager.exe`
+- Linux/macOS: `target/release/simple-rust-process-manager`
 
-## Usage
+### Prebuilt Binaries
 
-1. **First Run**: Launch the executable. If no `processes.json` exists next to it, one will be created automatically.
+See the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/releases) page.
 
-2. **Adding Processes**: Click the "+" button to add a new process entry. Fill in:
-   - **Name**: A friendly name for the process
-   - **Command**: The command to run (e.g., `npm run dev`, `uv run dev`)
-   - **Working Directory**: Where to run the command from
-   - **Type**: Either "Process" or "Docker"
-   - **Managed Restart**: Automatically restart this entry if it goes down
+## Basic Workflow
 
-3. **Managing Processes**:
-   - Click on a process in the left sidebar to view its logs
-   - Use the play/stop/restart/edit/delete buttons on each process card
-   - Use global controls in the header for batch operations
+1. Launch the app. If `processes.json` does not exist next to the executable, it will be created.
+2. Click `Add` to create a process entry.
+3. Choose a type:
+   - `Process` for normal commands like `npm run dev` or `uv run dev`
+   - `Docker` for container names controlled through Docker
+4. Optionally enable:
+   - managed restart
+   - disk logging
+5. Select a process in the left sidebar to watch its logs.
+6. Use stack-wide controls in the header when you want to bring everything up or down together.
 
-4. **Local API**:
-   - Use the `Enable API` / `Disable API` control in the header to turn the localhost REST server on or off
-   - Click `API Settings` to edit the port; the host is always fixed to `127.0.0.1`
-   - Click `Copy Agent Skill` to copy a bootstrap payload for an AI engineer or agent
+## Command Model
 
-5. **Docker Containers**: For Docker entries, specify the container name. The manager will use `docker start/stop/restart` commands.
+Commands are spawned directly, not through a shell.
 
-## Command Notes (Direct Spawn)
+Why that matters:
 
-Commands are executed directly (no shell), which keeps process IDs tight and makes stop/kill reliable.  
-That also means shell operators like `&&`, `|`, `>` aren't supported in the command box. If you need them, wrap the logic in a `.cmd`/`.bat`/`.ps1` or a script and call that script instead.
+- process IDs stay tighter and cleanup is more reliable
+- stop/kill behavior is more predictable
+- shell operators like `&&`, `|`, and `>` are not supported directly in the command field
+
+If you need shell composition, wrap it in a script such as `.cmd`, `.bat`, `.ps1`, or another executable entrypoint and run that instead.
 
 ## Configuration
 
-The `processes.json` file structure:
+The app stores configuration in `processes.json`.
+
+Example:
 
 ```json
 {
@@ -82,6 +163,7 @@ The `processes.json` file structure:
     "enabled": false,
     "port": 47821
   },
+  "log_directory": ".",
   "processes": [
     {
       "id": "uuid-here",
@@ -90,7 +172,9 @@ The `processes.json` file structure:
       "working_directory": "C:/projects/my-app/frontend",
       "process_type": "Process",
       "auto_start": false,
-      "auto_restart": true
+      "auto_restart": true,
+      "log_to_disk": true,
+      "log_rotation_count": 10
     },
     {
       "id": "uuid-here",
@@ -99,13 +183,19 @@ The `processes.json` file structure:
       "working_directory": "",
       "process_type": "Docker",
       "auto_start": false,
-      "auto_restart": false
+      "auto_restart": false,
+      "log_to_disk": false,
+      "log_rotation_count": 10
     }
   ]
 }
 ```
 
-Existing `processes.json` files from older versions are migrated automatically on startup. The new `remote_control` object is additive, so replacing the EXE does not require recreating your stack definition.
+Notes:
+
+- `log_directory` is the shared base folder for persisted logs
+- `.` resolves next to the executable
+- older config versions are migrated automatically on startup
 
 ## Local REST API
 
@@ -130,11 +220,10 @@ Control endpoints:
 
 Notes:
 
-- The API binds only to `127.0.0.1`
-- Use stable process `id` values, not display names, for per-process actions
-- Use `GET /processes/{id}/logs?limit=N` to read the last N log lines for one component; default is 200 and max is 1000
-- Control calls are fire-and-poll: after a `POST`, poll `GET /processes` or `GET /health`
-- `Copy Agent Skill` copies a text block that includes the current host, port, endpoint topology, and known process ids
+- the API binds only to `127.0.0.1`
+- use process `id`, not display name, for per-process actions
+- `GET /processes/{id}/logs?limit=N` defaults to `200` and caps at `1000`
+- control calls are fire-and-poll; poll `GET /processes` or `GET /health` for updated state
 
 ## Keyboard Shortcuts
 
@@ -148,40 +237,32 @@ Notes:
 ## Development
 
 ```bash
-# Run in development mode with hot reload
 cargo run
-
-# Run tests
 cargo test
-
-# Build release
 cargo build --release
 ```
 
-## Architecture
+## Stack
 
-- **egui / eframe**: Native immediate-mode desktop GUI for Rust
-- **Tokio**: Async runtime for process management
-- **Serde**: JSON serialization for config persistence
-- **portable-pty**: Cross-platform PTY support for log streaming
+- `Rust`: application code and native desktop packaging
+- `egui` / `eframe`: immediate-mode desktop UI
+- `Tokio`: async runtime and background orchestration
+- `Serde`: config persistence
+- `portable-pty`: process output capture
+- `Axum`: optional localhost REST API
 
 ## License
 
-MIT License - feel free to use this for any purpose.
+MIT
 
 ## Donations & Support
 
-If this saves you time or pain, you can support the work here:
+If this saves you time, you can support the work here:
 
-- Patreon (recurring)
-- GitHub Sponsors (recurring)
-- PayPal (one-time)
-
-Links:
-- https://www.patreon.com/EnviralDesign
-- https://github.com/sponsors/EnviralDesign
-- https://www.paypal.com/donate?hosted_button_id=RP8EJAHSDTZ86
+- [Patreon](https://www.patreon.com/EnviralDesign)
+- [GitHub Sponsors](https://github.com/sponsors/EnviralDesign)
+- [PayPal](https://www.paypal.com/donate?hosted_button_id=RP8EJAHSDTZ86)
 
 ## Contributing
 
-Contributions welcome! Please open an issue or PR.
+Issues and PRs are welcome.
