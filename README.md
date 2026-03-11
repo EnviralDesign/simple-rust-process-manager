@@ -16,6 +16,7 @@ It is built for the annoying real-world cases:
 
 - Start your full local stack from one UI instead of juggling terminals.
 - Watch live output for the selected process without leaving the app.
+- Auto-start only the processes you opt into when the manager itself launches.
 - Restart unstable services automatically with per-process managed restart.
 - Stop process trees cleanly on Windows, including messy child-process chains.
 - Mix normal commands and Docker containers in the same stack.
@@ -32,6 +33,7 @@ The main view is built for daily use: left-side process list, top-level stack co
 Highlights visible here:
 
 - `(M)` marks entries with managed restart enabled
+- `(A)` marks entries that auto-start when the app launches
 - `Start All`, `Stop All`, and `Restart All` control the whole stack
 - the selected process shows live output with warning/error color differentiation
 - the header can expose a loopback API and copy an agent bootstrap payload
@@ -46,6 +48,7 @@ This screen covers:
 
 - command and working directory changes
 - process vs Docker mode
+- auto-start with app launch
 - managed restart
 - disk log capture and retention
 
@@ -90,6 +93,7 @@ This panel controls:
 ### Resilience
 
 - Enable managed restart per entry for processes that should come back automatically.
+- Enable auto-start per entry when you want the stack to come up automatically after Process Manager launches.
 - On Windows, stop entire process trees with Job Objects so children are not orphaned.
 - Keep Docker behavior explicit: regular processes are shut down on app close, containers persist unless you stop them.
 
@@ -133,6 +137,7 @@ See the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/
    - `Process` for normal commands like `npm run dev` or `uv run dev`
    - `Docker` for container names controlled through Docker
 4. Optionally enable:
+   - auto-start with app launch
    - managed restart
    - disk logging
 5. Select a process in the left sidebar to watch its logs.

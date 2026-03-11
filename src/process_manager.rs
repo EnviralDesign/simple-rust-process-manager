@@ -78,6 +78,7 @@ pub struct ProcessRuntimeSnapshot {
     pub process_type: String,
     pub status: String,
     pub status_detail: Option<String>,
+    pub auto_start: bool,
     pub auto_restart: bool,
     pub command: String,
     pub working_directory: String,
@@ -910,6 +911,22 @@ impl ProcessManager {
         }
     }
 
+    /// Start only processes explicitly marked for auto-start on app launch
+    pub fn start_auto_start_processes(&self) {
+        let ids: Vec<String> = {
+            let processes = self.processes.lock().unwrap();
+            processes
+                .iter()
+                .filter(|(_, state)| state.config.auto_start)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        for id in ids {
+            self.start_process(&id);
+        }
+    }
+
     /// Stop all processes
     pub fn stop_all(&self) {
         let ids: Vec<String> = {
@@ -1249,6 +1266,7 @@ fn process_snapshot_from_state(state: &ProcessState) -> ProcessRuntimeSnapshot {
         process_type: state.config.process_type.to_string(),
         status,
         status_detail,
+        auto_start: state.config.auto_start,
         auto_restart: state.config.auto_restart,
         command: state.config.command.clone(),
         working_directory: state.config.working_directory.clone(),

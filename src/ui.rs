@@ -248,17 +248,9 @@ fn wgpu_configuration(
 }
 
 fn load_icon_data() -> Option<egui::IconData> {
-    let exe_path = std::env::current_exe().ok()?;
-    let exe_dir = exe_path.parent()?;
-    let icon_path = exe_dir.join("assets").join("icon.png");
-    let icon_path = if icon_path.exists() {
-        icon_path
-    } else {
-        std::path::PathBuf::from("assets/icon.png")
-    };
-
-    let icon_bytes = std::fs::read(&icon_path).ok()?;
-    let image = image::load_from_memory(&icon_bytes).ok()?.to_rgba8();
+    let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .ok()?
+        .to_rgba8();
     let (width, height) = image.dimensions();
 
     Some(egui::IconData {
@@ -274,6 +266,7 @@ struct ProcessDraft {
     command: String,
     working_directory: String,
     process_type: ProcessType,
+    auto_start: bool,
     auto_restart: bool,
     log_to_disk: bool,
     log_rotation_count: String,
@@ -286,6 +279,7 @@ impl Default for ProcessDraft {
             command: String::new(),
             working_directory: String::new(),
             process_type: ProcessType::Process,
+            auto_start: false,
             auto_restart: false,
             log_to_disk: false,
             log_rotation_count: DEFAULT_LOG_ROTATION_COUNT.to_string(),
@@ -300,6 +294,7 @@ impl ProcessDraft {
             command: process.command.clone(),
             working_directory: process.working_directory.clone(),
             process_type: process.process_type.clone(),
+            auto_start: process.auto_start,
             auto_restart: process.auto_restart,
             log_to_disk: process.log_to_disk,
             log_rotation_count: process.log_rotation_count.to_string(),
@@ -397,6 +392,7 @@ impl ProcessManagerApp {
             let _guard = runtime.enter();
             rest_controller.apply_config(config.stack_name.clone(), config.remote_control.clone());
         }
+        manager.start_auto_start_processes();
 
         let selected_process = config.processes.first().map(|process| process.id.clone());
         let runtime_snapshot = manager.build_ui_snapshot(selected_process.as_deref(), UI_LOG_LIMIT);
@@ -574,6 +570,7 @@ impl ProcessManagerApp {
                     form.working_directory.trim().to_string(),
                     form.process_type,
                 );
+                process.auto_start = form.auto_start;
                 process.auto_restart = form.auto_restart;
                 process.log_to_disk = form.log_to_disk;
                 process.log_rotation_count = log_rotation_count;
@@ -598,12 +595,6 @@ impl ProcessManagerApp {
                     }
                 };
 
-                let auto_start = self
-                    .config
-                    .get_process(&id)
-                    .map(|process| process.auto_start)
-                    .unwrap_or(false);
-
                 if matches!(
                     self.manager.get_status(&id),
                     Some(
@@ -620,7 +611,7 @@ impl ProcessManagerApp {
                     command: form.command.trim().to_string(),
                     working_directory: form.working_directory.trim().to_string(),
                     process_type: form.process_type,
-                    auto_start,
+                    auto_start: form.auto_start,
                     auto_restart: form.auto_restart,
                     log_to_disk: form.log_to_disk,
                     log_rotation_count,
@@ -1299,6 +1290,7 @@ impl ProcessManagerApp {
 
     fn draw_process_detail(&mut self, ui: &mut Ui, process: &ProcessConfig) {
         let logs = &self.runtime_snapshot.selected_logs;
+        let auto_start = if process.auto_start { "ON" } else { "OFF" };
         let managed_restart = if process.auto_restart { "ON" } else { "OFF" };
         let mut action_start = false;
         let mut action_stop = false;
@@ -1319,8 +1311,8 @@ impl ProcessManagerApp {
                     };
                     ui.label(
                         RichText::new(format!(
-                            "{} | {} | restart {}",
-                            type_label, &process.command, managed_restart
+                            "{} | {} | auto-start {} | restart {}",
+                            type_label, &process.command, auto_start, managed_restart
                         ))
                         .color(TEXT_MUTED)
                         .size(11.5),
@@ -1572,6 +1564,14 @@ impl ProcessManagerApp {
                                         modal_divider(ui);
                                         ui.add_space(16.0);
 
+                                        modal_checkbox_row(
+                                            ui,
+                                            &mut form.auto_start,
+                                            "Auto-start with app launch",
+                                            Some("Start this entry automatically whenever Process Manager starts."),
+                                        );
+
+                                        ui.add_space(14.0);
                                         modal_checkbox_row(
                                             ui,
                                             &mut form.auto_restart,
@@ -2142,7 +2142,8 @@ fn draw_process_row(
         text_color,
     );
 
-    if process.auto_restart {
+    let markers = process_markers(process);
+    if let Some(marker_text) = markers.as_deref() {
         let name_width = ui.fonts_mut(|fonts| {
             fonts
                 .layout_no_wrap(process.name.clone(), font_id.clone(), text_color)
@@ -2153,23 +2154,41 @@ fn draw_process_row(
         ui.painter().text(
             egui::pos2(text_pos.x + name_width, text_pos.y),
             Align2::LEFT_CENTER,
-            " (M)",
+            marker_text,
             font_id,
             marker_color,
         );
     }
 
-    let hover_text = if process.auto_restart {
-        format!("{}\nManaged restart enabled", process.command)
-    } else {
-        process.command.clone()
-    };
+    let mut hover_lines = vec![process.command.clone()];
+    if process.auto_start {
+        hover_lines.push("Auto-start on app launch enabled".to_string());
+    }
+    if process.auto_restart {
+        hover_lines.push("Managed restart enabled".to_string());
+    }
 
-    response.on_hover_text(hover_text)
+    response.on_hover_text(hover_lines.join("\n"))
 }
 
 fn field_label(text: &str) -> RichText {
     RichText::new(text).color(TEXT_SOFT).size(12.0).strong()
+}
+
+fn process_markers(process: &ProcessConfig) -> Option<String> {
+    let mut markers = Vec::new();
+    if process.auto_start {
+        markers.push("A");
+    }
+    if process.auto_restart {
+        markers.push("M");
+    }
+
+    if markers.is_empty() {
+        None
+    } else {
+        Some(format!(" ({})", markers.join(",")))
+    }
 }
 
 fn draw_sidebar_footer_button(ui: &mut Ui, label: &str) -> egui::Response {

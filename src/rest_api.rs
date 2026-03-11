@@ -83,7 +83,6 @@ impl RestServerSnapshot {
             RestServerState::Error => "Error",
         }
     }
-
 }
 
 struct ActiveServer {
@@ -602,8 +601,13 @@ pub fn build_agent_bootstrap(
     } else {
         for process in processes {
             lines.push(format!(
-                "- {} | id={} | type={} | status={}",
-                process.name, process.id, process.process_type, process.status
+                "- {} | id={} | type={} | status={} | auto_start={} | auto_restart={}",
+                process.name,
+                process.id,
+                process.process_type,
+                process.status,
+                process.auto_start,
+                process.auto_restart
             ));
         }
     }
