@@ -1,9 +1,9 @@
 [package]
 name = "simple-rust-process-manager"
-version = "0.1.0"
+version = "1.0.1"
 edition = "2021"
 description = "A simple process manager for development environments"
-authors = ["Developer"]
+authors = ["EnviralDesign"]
 
 [dependencies]
 arboard = "3.6"

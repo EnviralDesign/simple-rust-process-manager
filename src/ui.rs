@@ -56,6 +56,9 @@ const PROCESS_DIALOG_HEIGHT: f32 = 520.0;
 const GLOBAL_SETTINGS_HEIGHT: f32 = PROCESS_DIALOG_HEIGHT;
 const BROWSE_BUTTON_WIDTH: f32 = 82.0;
 const MODAL_FOOTER_HEIGHT: f32 = 58.0;
+const PROJECT_WEBSITE_URL: &str = "https://github.com/EnviralDesign/simple-rust-process-manager";
+const PROJECT_GITHUB_ACCOUNT_URL: &str = "https://github.com/EnviralDesign";
+const PROJECT_GITHUB_ACCOUNT_HANDLE: &str = "@EnviralDesign";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptionSyncMode {
@@ -343,6 +346,12 @@ impl RestSettingsForm {
             log_directory: config.log_directory.clone(),
         }
     }
+}
+
+struct AboutField {
+    label: &'static str,
+    value: String,
+    link: Option<&'static str>,
 }
 
 pub struct ProcessManagerApp {
@@ -1706,6 +1715,7 @@ impl ProcessManagerApp {
                                 1usize,
                                 "Local API",
                             );
+                            modal_tab_button(ui, &mut self.global_settings_tab, 2usize, "About");
                         });
                         ui.add_space(10.0);
                         let (rect, _) = ui.allocate_exact_size(
@@ -1772,6 +1782,20 @@ impl ProcessManagerApp {
                                         .color(TEXT_MUTED)
                                         .size(11.5),
                                 );
+                            } else if self.global_settings_tab == 2 {
+                                ui.label(
+                                    RichText::new("Project Information")
+                                        .color(TEXT_MAIN)
+                                        .size(14.0)
+                                        .strong(),
+                                );
+                                ui.add_space(14.0);
+
+                                for field in about_fields() {
+                                    draw_about_field(ui, &field);
+                                    ui.add_space(10.0);
+                                }
+
                             }
 
                             if let Some(error) = &self.rest_settings_error {
@@ -1783,10 +1807,17 @@ impl ProcessManagerApp {
                 );
 
                 modal_footer(ui, |ui| {
-                    if subtle_action_button(ui, "Save", Some(ACCENT_SOFT)).clicked() {
+                    if self.global_settings_tab != 2
+                        && subtle_action_button(ui, "Save", Some(ACCENT_SOFT)).clicked()
+                    {
                         save = true;
                     }
-                    if shell_button(ui, "Cancel").clicked() {
+                    let close_label = if self.global_settings_tab == 2 {
+                        "Close"
+                    } else {
+                        "Cancel"
+                    };
+                    if shell_button(ui, close_label).clicked() {
                         self.rest_settings_open = false;
                     }
                 });
@@ -1908,16 +1939,26 @@ impl ProcessManagerApp {
         let small_icon_handle = self.taskbar_small_icon_handle;
 
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GCLP_HICON, GCLP_HICONSM, ICON_BIG, ICON_SMALL, SendMessageW, SetClassLongPtrW,
+            SendMessageW, SetClassLongPtrW, GCLP_HICON, GCLP_HICONSM, ICON_BIG, ICON_SMALL,
             WM_SETICON,
         };
 
         unsafe {
             SetClassLongPtrW(hwnd, GCLP_HICON, big_icon_handle as isize);
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, big_icon_handle as isize);
+            SendMessageW(
+                hwnd,
+                WM_SETICON,
+                ICON_BIG as usize,
+                big_icon_handle as isize,
+            );
             if let Some(small_icon_handle) = small_icon_handle {
                 SetClassLongPtrW(hwnd, GCLP_HICONSM, small_icon_handle as isize);
-                SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small_icon_handle as isize);
+                SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    ICON_SMALL as usize,
+                    small_icon_handle as isize,
+                );
             }
         }
 
@@ -2097,6 +2138,58 @@ fn configure_fonts(ctx: &Context) {
 
 fn window_title(stack_name: &str) -> String {
     format!("Process Manager - {}", stack_name)
+}
+
+fn about_fields() -> Vec<AboutField> {
+    vec![
+        AboutField {
+            label: "Name",
+            value: env!("CARGO_PKG_NAME").to_string(),
+            link: None,
+        },
+        AboutField {
+            label: "Version",
+            value: env!("CARGO_PKG_VERSION").to_string(),
+            link: None,
+        },
+        AboutField {
+            label: "Author",
+            value: env!("CARGO_PKG_AUTHORS").to_string(),
+            link: Some(PROJECT_GITHUB_ACCOUNT_URL),
+        },
+        AboutField {
+            label: "Website",
+            value: PROJECT_WEBSITE_URL.to_string(),
+            link: Some(PROJECT_WEBSITE_URL),
+        },
+        AboutField {
+            label: "GitHub",
+            value: PROJECT_GITHUB_ACCOUNT_HANDLE.to_string(),
+            link: Some(PROJECT_GITHUB_ACCOUNT_URL),
+        },
+    ]
+}
+
+fn draw_about_field(ui: &mut Ui, field: &AboutField) {
+    egui::Frame::default()
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(MODAL_FORM_WIDTH);
+            ui.label(field_label(field.label));
+            ui.add_space(4.0);
+
+            if let Some(link) = field.link {
+                ui.hyperlink_to(
+                    RichText::new(&field.value).color(TEXT_MAIN).size(13.0),
+                    link,
+                );
+            } else {
+                ui.label(RichText::new(&field.value).color(TEXT_MAIN).size(13.0));
+            }
+        });
 }
 
 fn stack_summary(counts: &ProcessCounts) -> String {
@@ -2699,9 +2792,7 @@ fn sample_windows_title_bar_color(window_title: &str) -> Option<Color32> {
 }
 
 #[cfg(windows)]
-fn find_window_by_title(
-    window_title: &str,
-) -> Option<windows_sys::Win32::Foundation::HWND> {
+fn find_window_by_title(window_title: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
     use std::iter;
 
     use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
@@ -2721,7 +2812,9 @@ fn extract_root_hwnd(
 ) -> Option<windows_sys::Win32::Foundation::HWND> {
     let handle = cc.window_handle().ok()?;
     match handle.as_raw() {
-        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+        RawWindowHandle::Win32(handle) => {
+            Some(handle.hwnd.get() as windows_sys::Win32::Foundation::HWND)
+        }
         _ => None,
     }
 }
@@ -2739,11 +2832,23 @@ fn load_executable_taskbar_icon_handles() -> (
     let Some(exe_path) = std::env::current_exe().ok() else {
         return (None, None);
     };
-    let exe_path_wide: Vec<u16> = exe_path.as_os_str().encode_wide().chain(iter::once(0)).collect();
+    let exe_path_wide: Vec<u16> = exe_path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect();
 
     let mut large_icon = std::ptr::null_mut();
     let mut small_icon = std::ptr::null_mut();
-    let extracted = unsafe { ExtractIconExW(exe_path_wide.as_ptr(), 0, &mut large_icon, &mut small_icon, 1) };
+    let extracted = unsafe {
+        ExtractIconExW(
+            exe_path_wide.as_ptr(),
+            0,
+            &mut large_icon,
+            &mut small_icon,
+            1,
+        )
+    };
 
     if extracted == 0 {
         (None, None)
