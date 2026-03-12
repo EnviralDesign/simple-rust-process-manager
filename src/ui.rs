@@ -1,5 +1,6 @@
 //! Native desktop shell built with egui/eframe.
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -336,6 +337,7 @@ struct RestSettingsForm {
     enabled: bool,
     port: String,
     log_directory: String,
+    process_error_flash_seconds: String,
 }
 
 impl RestSettingsForm {
@@ -344,6 +346,7 @@ impl RestSettingsForm {
             enabled: config.remote_control.enabled,
             port: config.remote_control.port.to_string(),
             log_directory: config.log_directory.clone(),
+            process_error_flash_seconds: config.process_error_flash_seconds.to_string(),
         }
     }
 }
@@ -352,6 +355,11 @@ struct AboutField {
     label: &'static str,
     value: String,
     link: Option<&'static str>,
+}
+
+struct TimedFlash {
+    started_at: Instant,
+    until: Instant,
 }
 
 pub struct ProcessManagerApp {
@@ -372,6 +380,8 @@ pub struct ProcessManagerApp {
     copy_feedback_until: Option<Instant>,
     stick_logs_to_bottom: bool,
     last_error_version: u64,
+    last_process_error_versions: HashMap<String, u64>,
+    process_row_flashes: HashMap<String, TimedFlash>,
     current_title: String,
     #[cfg(windows)]
     root_hwnd: Option<windows_sys::Win32::Foundation::HWND>,
@@ -421,6 +431,7 @@ impl ProcessManagerApp {
         let last_manager_version = manager.current_version();
         let current_title = window_title(&config.stack_name);
         let rest_settings_form = RestSettingsForm::from_config(&config);
+        let last_process_error_versions = manager.error_versions();
         cc.egui_ctx
             .send_viewport_cmd(ViewportCommand::Title(current_title.clone()));
         let (renderer_backend, renderer_adapter) = cc
@@ -454,6 +465,8 @@ impl ProcessManagerApp {
             copy_feedback_until: None,
             stick_logs_to_bottom: true,
             last_error_version: 0,
+            last_process_error_versions,
+            process_row_flashes: HashMap::new(),
             current_title,
             #[cfg(windows)]
             root_hwnd: extract_root_hwnd(cc),
@@ -501,6 +514,70 @@ impl ProcessManagerApp {
             self.banner = None;
         }
         self.banner.as_ref().map(|(message, _)| message.as_str())
+    }
+
+    fn trigger_process_flash(&mut self, process_id: &str) {
+        if self.config.process_error_flash_seconds == 0 {
+            return;
+        }
+
+        let started_at = Instant::now();
+        self.process_row_flashes.insert(
+            process_id.to_string(),
+            TimedFlash {
+                started_at,
+                until: started_at + Duration::from_secs(self.config.process_error_flash_seconds),
+            },
+        );
+    }
+
+    fn process_row_flash_fade(&self, process_id: &str, now: Instant) -> Option<f32> {
+        let flash = self.process_row_flashes.get(process_id)?;
+        if now >= flash.until {
+            return None;
+        }
+
+        let total = flash.until.saturating_duration_since(flash.started_at);
+        if total.is_zero() {
+            return Some(1.0);
+        }
+
+        Some(
+            (flash.until.saturating_duration_since(now).as_secs_f32() / total.as_secs_f32())
+                .clamp(0.0, 1.0),
+        )
+    }
+
+    fn any_process_row_flash_active(&self, now: Instant) -> bool {
+        self.process_row_flashes
+            .values()
+            .any(|flash| now < flash.until)
+    }
+
+    fn process_row_flash_intensity(&self, ctx: &Context, process_id: &str) -> f32 {
+        let Some(fade) = self.process_row_flash_fade(process_id, Instant::now()) else {
+            return 0.0;
+        };
+
+        let tail_fade = if fade > 0.18 { 1.0 } else { fade / 0.18 };
+        let pulse =
+            0.6 + ((((ctx.input(|input| input.time) as f32) * 8.5).sin() * 0.5) + 0.5) * 0.4;
+        pulse * tail_fade.clamp(0.0, 1.0)
+    }
+
+    fn sync_process_error_flashes(&mut self) {
+        let current_versions = self.manager.error_versions();
+        for (process_id, current_version) in &current_versions {
+            let previous_version = self
+                .last_process_error_versions
+                .get(process_id)
+                .copied()
+                .unwrap_or(0);
+            if *current_version > previous_version {
+                self.trigger_process_flash(process_id);
+            }
+        }
+        self.last_process_error_versions = current_versions;
     }
 
     fn rest_snapshot(&self) -> RestServerSnapshot {
@@ -665,6 +742,15 @@ impl ProcessManagerApp {
                 return;
             }
         };
+        let process_error_flash_seconds = match parse_process_error_flash_seconds(
+            &self.rest_settings_form.process_error_flash_seconds,
+        ) {
+            Ok(seconds) => seconds,
+            Err(err) => {
+                self.rest_settings_error = Some(err);
+                return;
+            }
+        };
 
         let trimmed = self.stack_name_buffer.trim();
         if !trimmed.is_empty() && trimmed != self.config.stack_name {
@@ -674,6 +760,7 @@ impl ProcessManagerApp {
         self.config.remote_control.enabled = self.rest_settings_form.enabled;
         self.config.remote_control.port = parsed_port;
         self.config.log_directory = normalize_log_directory(&self.rest_settings_form.log_directory);
+        self.config.process_error_flash_seconds = process_error_flash_seconds;
         self.persist_config();
         self.manager
             .set_log_directory(self.config.log_directory.clone());
@@ -686,6 +773,8 @@ impl ProcessManagerApp {
     fn delete_process(&mut self, process_id: &str) {
         self.manager.remove_process(process_id);
         self.config.remove_process(process_id);
+        self.last_process_error_versions.remove(process_id);
+        self.process_row_flashes.remove(process_id);
         self.persist_config();
         if self.selected_process.as_deref() == Some(process_id) {
             self.selected_process = None;
@@ -843,6 +932,10 @@ impl ProcessManagerApp {
         }
 
         if self.copy_feedback_until.is_some_and(|until| now < until) {
+            return Some(Duration::from_millis(100));
+        }
+
+        if self.any_process_row_flash_active(now) {
             return Some(Duration::from_millis(100));
         }
 
@@ -1250,8 +1343,16 @@ impl ProcessManagerApp {
                                         .unwrap_or(ProcessStatus::Stopped);
                                     let is_selected = self.selected_process.as_deref()
                                         == Some(process.id.as_str());
-                                    if draw_process_row(ui, &process, &status, is_selected)
-                                        .clicked()
+                                    let flash_intensity =
+                                        self.process_row_flash_intensity(ctx, &process.id);
+                                    if draw_process_row(
+                                        ui,
+                                        &process,
+                                        &status,
+                                        is_selected,
+                                        flash_intensity,
+                                    )
+                                    .clicked()
                                     {
                                         self.selected_process = Some(process.id.clone());
                                         self.refresh_runtime_snapshot(true);
@@ -1758,6 +1859,22 @@ impl ProcessManagerApp {
                                     .color(TEXT_MUTED)
                                     .size(11.5),
                                 );
+                                ui.add_space(14.0);
+                                ui.label(field_label("Error Flash Duration (seconds)"));
+                                modal_text_edit(
+                                    ui,
+                                    &mut self.rest_settings_form.process_error_flash_seconds,
+                                    "5",
+                                    MODAL_FORM_WIDTH,
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Softly flashes the Processes sidebar when a new error arrives. Use 0 to disable.",
+                                    )
+                                    .color(TEXT_MUTED)
+                                    .size(11.5),
+                                );
                             } else if self.global_settings_tab == 1 {
                                 modal_checkbox_row(
                                     ui,
@@ -1904,14 +2021,12 @@ impl ProcessManagerApp {
             return;
         }
 
+        self.sync_process_error_flashes();
         self.last_error_version = current;
 
-        let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
-        if !focused {
-            ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
-                egui::UserAttentionType::Informational,
-            ));
-        }
+        ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
     }
 
     #[cfg(windows)]
@@ -2274,22 +2389,34 @@ fn draw_process_row(
     process: &ProcessConfig,
     status: &ProcessStatus,
     selected: bool,
+    flash_intensity: f32,
 ) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
 
     let is_hovered = response.hovered();
 
-    let bg_color = if selected {
+    let base_bg_color = if selected {
         Color32::from_white_alpha(15)
     } else if is_hovered {
         Color32::from_white_alpha(8)
     } else {
         Color32::TRANSPARENT
     };
+    let bg_color = blend_color(base_bg_color, DANGER, 0.62 * flash_intensity);
 
     if bg_color != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, 4.0, bg_color);
+    }
+
+    if flash_intensity > 0.0 {
+        let stroke_color = blend_color(Color32::TRANSPARENT, DANGER, 0.92 * flash_intensity);
+        ui.painter().rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, stroke_color),
+            egui::StrokeKind::Outside,
+        );
     }
 
     if selected {
@@ -2697,6 +2824,15 @@ fn parse_log_rotation_count(value: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_process_error_flash_seconds(value: &str) -> Result<u64, String> {
+    match value.trim().parse::<u64>() {
+        Ok(seconds) => Ok(seconds),
+        Err(_) => Err(
+            "Error flash duration must be a whole number of seconds (0 disables it).".to_string(),
+        ),
+    }
+}
+
 fn normalize_log_directory(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -2704,6 +2840,17 @@ fn normalize_log_directory(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn blend_color(base: Color32, overlay: Color32, amount: f32) -> Color32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let inverse = 1.0 - amount;
+    Color32::from_rgba_unmultiplied(
+        ((base.r() as f32 * inverse) + (overlay.r() as f32 * amount)).round() as u8,
+        ((base.g() as f32 * inverse) + (overlay.g() as f32 * amount)).round() as u8,
+        ((base.b() as f32 * inverse) + (overlay.b() as f32 * amount)).round() as u8,
+        ((base.a() as f32 * inverse) + (overlay.a() as f32 * amount)).round() as u8,
+    )
 }
 
 fn append_diagnostics_line(log_path: &mut Option<PathBuf>, line: &str) {

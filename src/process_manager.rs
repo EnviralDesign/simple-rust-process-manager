@@ -109,6 +109,7 @@ pub struct ProcessManager {
     event_tx: watch::Sender<u64>,
     event_version: Arc<AtomicU64>,
     error_version: Arc<AtomicU64>,
+    process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
     background_started: AtomicBool,
     has_docker_entries: Arc<AtomicBool>,
 }
@@ -128,6 +129,7 @@ impl ProcessManager {
             event_tx,
             event_version: Arc::new(AtomicU64::new(0)),
             error_version: Arc::new(AtomicU64::new(0)),
+            process_error_versions: Arc::new(Mutex::new(HashMap::new())),
             background_started: AtomicBool::new(false),
             has_docker_entries: Arc::new(AtomicBool::new(false)),
         }
@@ -135,6 +137,10 @@ impl ProcessManager {
 
     pub fn error_version(&self) -> u64 {
         self.error_version.load(Ordering::Relaxed)
+    }
+
+    pub fn error_versions(&self) -> HashMap<String, u64> {
+        self.process_error_versions.lock().unwrap().clone()
     }
 
     pub fn set_log_directory(&self, directory: impl Into<String>) {
@@ -166,6 +172,7 @@ impl ProcessManager {
         let event_tx = self.event_tx.clone();
         let event_version = self.event_version.clone();
         let error_version = self.error_version.clone();
+        let process_error_versions = self.process_error_versions.clone();
         let has_docker_entries = self.has_docker_entries.clone();
         let log_directory = self.log_directory.clone();
 
@@ -194,6 +201,7 @@ impl ProcessManager {
                     &event_tx,
                     &event_version,
                     &error_version,
+                    &process_error_versions,
                 );
             }
         });
@@ -202,18 +210,27 @@ impl ProcessManager {
     /// Initialize process states from config
     pub fn init_from_config(&self, configs: &[ProcessConfig]) {
         let mut processes = self.processes.lock().unwrap();
+        let mut process_error_versions = self.process_error_versions.lock().unwrap();
         for config in configs {
             if !processes.contains_key(&config.id) {
                 processes.insert(config.id.clone(), ProcessState::new(config.clone()));
             }
+            process_error_versions.entry(config.id.clone()).or_insert(0);
         }
+        process_error_versions.retain(|id, _| processes.contains_key(id));
         self.update_docker_polling_flag_locked(&processes);
     }
 
     /// Add a new process
     pub fn add_process(&self, config: ProcessConfig) {
         let mut processes = self.processes.lock().unwrap();
-        processes.insert(config.id.clone(), ProcessState::new(config));
+        let process_id = config.id.clone();
+        processes.insert(process_id.clone(), ProcessState::new(config));
+        self.process_error_versions
+            .lock()
+            .unwrap()
+            .entry(process_id)
+            .or_insert(0);
         self.update_docker_polling_flag_locked(&processes);
         self.notify();
     }
@@ -236,6 +253,7 @@ impl ProcessManager {
         self.stop_process(id);
         let mut processes = self.processes.lock().unwrap();
         processes.remove(id);
+        self.process_error_versions.lock().unwrap().remove(id);
         self.update_docker_polling_flag_locked(&processes);
         self.notify();
     }
@@ -248,6 +266,7 @@ impl ProcessManager {
         let event_tx = self.event_tx.clone();
         let event_version = self.event_version.clone();
         let error_version = self.error_version.clone();
+        let process_error_versions = self.process_error_versions.clone();
 
         // Get config and update status
         let config = {
@@ -290,6 +309,7 @@ impl ProcessManager {
                     event_tx,
                     event_version,
                     error_version,
+                    process_error_versions,
                 );
             }
             ProcessType::Docker => {
@@ -301,6 +321,7 @@ impl ProcessManager {
                     event_tx,
                     event_version,
                     error_version,
+                    process_error_versions,
                 );
             }
         }
@@ -314,6 +335,7 @@ impl ProcessManager {
         event_tx: watch::Sender<u64>,
         event_version: Arc<AtomicU64>,
         error_version: Arc<AtomicU64>,
+        process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
     ) {
         let id_owned = id.to_string();
         let command = config.command.clone();
@@ -332,7 +354,7 @@ impl ProcessManager {
                         state.status = ProcessStatus::Error(e.clone());
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
-                    bump_error(&error_version);
+                    bump_error(&error_version, &process_error_versions, &id_owned);
                     bump_event(&event_tx, &event_version);
                     return;
                 }
@@ -347,7 +369,7 @@ impl ProcessManager {
                         state.status = ProcessStatus::Error(e.clone());
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
-                    bump_error(&error_version);
+                    bump_error(&error_version, &process_error_versions, &id_owned);
                     bump_event(&event_tx, &event_version);
                     return;
                 }
@@ -450,6 +472,7 @@ impl ProcessManager {
                         let event_tx = event_tx.clone();
                         let event_version = event_version.clone();
                         let error_version = error_version.clone();
+                        let process_error_versions = process_error_versions.clone();
                         thread::spawn(move || {
                             let reader = BufReader::new(stdout);
                             for line in reader.lines().map_while(Result::ok) {
@@ -457,7 +480,11 @@ impl ProcessManager {
                                     append_runtime_log(&processes_clone, &id_clone, line, false);
                                 if updated {
                                     if has_error {
-                                        bump_error(&error_version);
+                                        bump_error(
+                                            &error_version,
+                                            &process_error_versions,
+                                            &id_clone,
+                                        );
                                     }
                                     bump_event(&event_tx, &event_version);
                                 }
@@ -472,6 +499,7 @@ impl ProcessManager {
                         let event_tx = event_tx.clone();
                         let event_version = event_version.clone();
                         let error_version = error_version.clone();
+                        let process_error_versions = process_error_versions.clone();
                         thread::spawn(move || {
                             let reader = BufReader::new(stderr);
                             for line in reader.lines().map_while(Result::ok) {
@@ -479,7 +507,11 @@ impl ProcessManager {
                                     append_runtime_log(&processes_clone, &id_clone, line, true);
                                 if updated {
                                     if has_error {
-                                        bump_error(&error_version);
+                                        bump_error(
+                                            &error_version,
+                                            &process_error_versions,
+                                            &id_clone,
+                                        );
                                     }
                                     bump_event(&event_tx, &event_version);
                                 }
@@ -493,6 +525,7 @@ impl ProcessManager {
                     let event_tx = event_tx.clone();
                     let event_version = event_version.clone();
                     let error_version = error_version.clone();
+                    let process_error_versions = process_error_versions.clone();
                     thread::spawn(move || {
                         loop {
                             thread::sleep(std::time::Duration::from_millis(500));
@@ -558,7 +591,11 @@ impl ProcessManager {
                             }
                             if updated {
                                 if had_error {
-                                    bump_error(&error_version);
+                                    bump_error(
+                                        &error_version,
+                                        &process_error_versions,
+                                        &id_monitor,
+                                    );
                                 }
                                 bump_event(&event_tx, &event_version);
                             }
@@ -570,6 +607,7 @@ impl ProcessManager {
                                     event_tx.clone(),
                                     event_version.clone(),
                                     error_version.clone(),
+                                    process_error_versions.clone(),
                                 );
                             }
                             if should_break {
@@ -584,7 +622,7 @@ impl ProcessManager {
                         state.status = ProcessStatus::Error(e.to_string());
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
-                    bump_error(&error_version);
+                    bump_error(&error_version, &process_error_versions, &id_owned);
                     bump_event(&event_tx, &event_version);
                 }
             }
@@ -599,6 +637,7 @@ impl ProcessManager {
         event_tx: watch::Sender<u64>,
         event_version: Arc<AtomicU64>,
         error_version: Arc<AtomicU64>,
+        process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
     ) {
         let id_owned = id.to_string();
         let container_name = config.command.clone();
@@ -657,7 +696,7 @@ impl ProcessManager {
                                 format!("[Failed to start: {}]", stderr),
                             );
                             state.disk_log = None;
-                            bump_error(&error_version);
+                            bump_error(&error_version, &process_error_versions, &id_owned);
                         }
                     }
                     bump_event(&event_tx, &event_version);
@@ -669,7 +708,7 @@ impl ProcessManager {
                         log_process_state_event(state, format!("[Failed to start docker: {}]", e));
                         state.disk_log = None;
                     }
-                    bump_error(&error_version);
+                    bump_error(&error_version, &process_error_versions, &id_owned);
                     bump_event(&event_tx, &event_version);
                 }
             }
@@ -682,6 +721,7 @@ impl ProcessManager {
                 event_tx,
                 event_version,
                 error_version,
+                process_error_versions,
             );
         });
     }
@@ -693,6 +733,7 @@ impl ProcessManager {
         event_tx: watch::Sender<u64>,
         event_version: Arc<AtomicU64>,
         error_version: Arc<AtomicU64>,
+        process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
     ) {
         let id_owned = id.to_string();
         let container = container_name.to_string();
@@ -739,7 +780,7 @@ impl ProcessManager {
                         };
                         if updated {
                             if has_error {
-                                bump_error(&error_version);
+                                bump_error(&error_version, &process_error_versions, &id_owned);
                             }
                             bump_event(&event_tx, &event_version);
                         }
@@ -1104,6 +1145,7 @@ impl ProcessManager {
             &self.event_tx,
             &self.event_version,
             &self.error_version,
+            &self.process_error_versions,
         );
     }
 }
@@ -1290,10 +1332,17 @@ fn bump_event(event_tx: &watch::Sender<u64>, event_version: &Arc<AtomicU64>) {
     let _ = event_tx.send(next);
 }
 
-fn bump_error(error_version: &Arc<AtomicU64>) {
+fn bump_error(
+    error_version: &Arc<AtomicU64>,
+    process_error_versions: &Arc<Mutex<HashMap<String, u64>>>,
+    process_id: &str,
+) {
     let _ = error_version
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_add(1);
+    let mut versions = process_error_versions.lock().unwrap();
+    let entry = versions.entry(process_id.to_string()).or_insert(0);
+    *entry = entry.wrapping_add(1);
 }
 
 fn schedule_managed_restart(
@@ -1303,9 +1352,10 @@ fn schedule_managed_restart(
     event_tx: watch::Sender<u64>,
     event_version: Arc<AtomicU64>,
     error_version: Arc<AtomicU64>,
+    process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
 ) {
     // Reuse the same attention signal that error events use.
-    bump_error(&error_version);
+    bump_error(&error_version, &process_error_versions, &id);
 
     thread::spawn(move || {
         thread::sleep(std::time::Duration::from_secs(1));
@@ -1347,6 +1397,7 @@ fn schedule_managed_restart(
                 event_tx.clone(),
                 event_version.clone(),
                 error_version.clone(),
+                process_error_versions.clone(),
             ),
             ProcessType::Docker => ProcessManager::start_docker_container(
                 &id,
@@ -1356,6 +1407,7 @@ fn schedule_managed_restart(
                 event_tx.clone(),
                 event_version.clone(),
                 error_version.clone(),
+                process_error_versions.clone(),
             ),
         }
     });
@@ -1666,6 +1718,7 @@ fn refresh_docker_status_inner(
     event_tx: &watch::Sender<u64>,
     event_version: &Arc<AtomicU64>,
     error_version: &Arc<AtomicU64>,
+    process_error_versions: &Arc<Mutex<HashMap<String, u64>>>,
 ) {
     let container_name = {
         let processes = processes.lock().unwrap();
@@ -1744,6 +1797,7 @@ fn refresh_docker_status_inner(
                     event_tx.clone(),
                     event_version.clone(),
                     error_version.clone(),
+                    process_error_versions.clone(),
                 );
             }
         }

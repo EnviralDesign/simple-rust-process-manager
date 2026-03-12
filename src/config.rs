@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 47_821;
 pub const DEFAULT_LOG_ROTATION_COUNT: usize = 10;
+pub const DEFAULT_PROCESS_ERROR_FLASH_SECONDS: u64 = 5;
 
 /// Type of process being managed
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,6 +124,9 @@ pub struct AppConfig {
     /// Base directory for persisted process logs. Relative paths resolve next to the executable.
     #[serde(default = "default_log_directory")]
     pub log_directory: String,
+    /// How long the Processes sidebar softly flashes after a new error arrives. Set to 0 to disable.
+    #[serde(default = "default_process_error_flash_seconds")]
+    pub process_error_flash_seconds: u64,
     #[serde(default)]
     pub processes: Vec<ProcessConfig>,
 }
@@ -135,12 +139,17 @@ fn default_log_directory() -> String {
     ".".to_string()
 }
 
+fn default_process_error_flash_seconds() -> u64 {
+    DEFAULT_PROCESS_ERROR_FLASH_SECONDS
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             stack_name: default_stack_name(),
             remote_control: RemoteControlConfig::default(),
             log_directory: default_log_directory(),
+            process_error_flash_seconds: default_process_error_flash_seconds(),
             processes: Vec::new(),
         }
     }

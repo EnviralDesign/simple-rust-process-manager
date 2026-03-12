@@ -7,8 +7,7 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR missing"));
     let icon_path = out_dir.join("app-icon.ico");
 
-    generate_windows_icon("assets/icon.png", &icon_path)
-        .expect("Failed to generate Windows icon");
+    generate_windows_icon("assets/icon.png", &icon_path).expect("Failed to generate Windows icon");
 
     let mut res = winresource::WindowsResource::new();
     res.set_icon(icon_path.to_string_lossy().as_ref());
