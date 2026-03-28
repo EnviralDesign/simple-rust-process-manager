@@ -20,10 +20,20 @@ use crate::config::{AppConfig, ProcessConfig, ProcessType, DEFAULT_LOG_ROTATION_
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
 use crate::rest_api::{build_agent_bootstrap, RestServerController, RestServerSnapshot};
 
-const SHELL_BG: Color32 = Color32::from_rgb(30, 30, 30); // Sidebar/header shell — gets overridden by caption probe
+const SHELL_BG: Color32 = Color32::from_rgb(32, 32, 36); // Fixed shell / native caption chrome
 const BODY_BG: Color32 = Color32::from_rgb(24, 24, 24); // Content inset — neutral gray like Codex main pane
 const PANEL_BG: Color32 = Color32::from_rgb(26, 26, 29); // Dialogs, raised surfaces
 const BORDER: Color32 = Color32::from_rgb(45, 45, 48);
+const SHELL_HOVER_BG: Color32 = Color32::from_rgb(40, 40, 45);
+const SHELL_ACTIVE_BG: Color32 = Color32::from_rgb(47, 47, 53);
+const SHELL_STROKE: Color32 = Color32::from_rgb(56, 56, 62);
+const SHELL_SUBTLE_STROKE: Color32 = Color32::from_rgb(50, 50, 56);
+const PROCESS_ROW_SELECTED_BG: Color32 = Color32::from_rgb(43, 43, 48);
+const PROCESS_ROW_HOVER_BG: Color32 = Color32::from_rgb(37, 37, 42);
+const TAB_SELECTED_BG: Color32 = Color32::from_rgb(55, 71, 95);
+const TAB_SELECTED_HOVER_BG: Color32 = Color32::from_rgb(61, 79, 105);
+const TAB_SELECTED_ACTIVE_BG: Color32 = Color32::from_rgb(68, 88, 116);
+const TAB_SELECTED_STROKE: Color32 = Color32::from_rgb(112, 150, 204);
 const TEXT_MAIN: Color32 = Color32::from_rgb(237, 237, 237); // #EDEDED
 const TEXT_MUTED: Color32 = Color32::from_rgb(136, 136, 136); // #888888
 const TEXT_SOFT: Color32 = Color32::from_rgb(180, 180, 180);
@@ -42,10 +52,6 @@ const UI_LOG_LIMIT: usize = 1000;
 const WINDOW_CORNER_RADIUS: u8 = 8;
 const CONTENT_GUTTER_X: i8 = 16;
 const LOG_STICK_THRESHOLD_PX: f32 = 22.0;
-const BUTTON_HOVER_ALPHA: u8 = 8;
-const BUTTON_ACTIVE_ALPHA: u8 = 15;
-const BUTTON_BORDER_ALPHA: u8 = 15;
-const BUTTON_BORDER_ACTIVE_ALPHA: u8 = 24;
 const FIELD_BG: Color32 = Color32::from_rgb(20, 20, 20);
 const FIELD_BG_HOVER: Color32 = Color32::from_rgb(24, 24, 24);
 const FIELD_BORDER: Color32 = Color32::from_gray(46);
@@ -73,6 +79,7 @@ enum RendererProfile {
     WgpuDefault,
     WgpuDx12,
     WgpuVulkan,
+    Glow,
 }
 
 impl RendererProfile {
@@ -81,6 +88,7 @@ impl RendererProfile {
             Self::WgpuDefault => "wgpu-default",
             Self::WgpuDx12 => "wgpu-dx12",
             Self::WgpuVulkan => "wgpu-vulkan",
+            Self::Glow => "glow",
         }
     }
 }
@@ -104,35 +112,30 @@ struct RuntimeToggles {
 impl RuntimeToggles {
     fn from_env() -> Self {
         let mut toggles = Self {
-            renderer: RendererProfile::WgpuDefault,
-            present: PresentProfile::AutoVsync,
-            vsync: true,
+            renderer: default_renderer_profile(),
+            present: default_present_profile(),
+            vsync: default_vsync_enabled(),
             run_and_return: false,
-            caption_sync: CaptionSyncMode::Startup,
+            // Screen readback for title-bar sampling is purely cosmetic and can
+            // become expensive on some Windows GPU / remote-desktop setups.
+            caption_sync: CaptionSyncMode::Off,
             diagnostics: false,
         };
 
-        let use_runtime_toggles = std::env::var("PM_USE_RUNTIME_TOGGLES")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if !use_runtime_toggles {
-            return toggles;
-        }
-
         toggles.renderer = match std::env::var("PM_RENDERER")
-            .unwrap_or_else(|_| "wgpu-default".to_string())
+            .unwrap_or_else(|_| toggles.renderer.label().to_string())
             .to_ascii_lowercase()
             .as_str()
         {
             "wgpu" | "wgpu-default" => RendererProfile::WgpuDefault,
             "wgpu-dx12" | "dx12" => RendererProfile::WgpuDx12,
             "wgpu-vulkan" | "vulkan" => RendererProfile::WgpuVulkan,
+            "glow" | "opengl" => RendererProfile::Glow,
             _ => RendererProfile::WgpuDefault,
         };
 
         toggles.present = match std::env::var("PM_PRESENT_MODE")
-            .unwrap_or_else(|_| "auto-vsync".to_string())
+            .unwrap_or_else(|_| default_present_label(toggles.present).to_string())
             .to_ascii_lowercase()
             .as_str()
         {
@@ -149,7 +152,7 @@ impl RuntimeToggles {
             .unwrap_or(false);
 
         toggles.caption_sync = match std::env::var("PM_CAPTION_SYNC")
-            .unwrap_or_else(|_| "continuous".to_string())
+            .unwrap_or_else(|_| default_caption_sync_label(toggles.caption_sync).to_string())
             .to_ascii_lowercase()
             .as_str()
         {
@@ -163,6 +166,57 @@ impl RuntimeToggles {
             .unwrap_or(false);
 
         toggles
+    }
+}
+
+fn default_renderer_profile() -> RendererProfile {
+    #[cfg(windows)]
+    {
+        RendererProfile::WgpuDx12
+    }
+
+    #[cfg(not(windows))]
+    {
+        RendererProfile::WgpuDefault
+    }
+}
+
+fn default_present_profile() -> PresentProfile {
+    #[cfg(windows)]
+    {
+        PresentProfile::AutoNoVsync
+    }
+
+    #[cfg(not(windows))]
+    {
+        PresentProfile::AutoVsync
+    }
+}
+
+fn default_vsync_enabled() -> bool {
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+fn default_present_label(present: PresentProfile) -> &'static str {
+    match present {
+        PresentProfile::AutoVsync => "auto-vsync",
+        PresentProfile::AutoNoVsync => "auto-no-vsync",
+    }
+}
+
+fn default_caption_sync_label(mode: CaptionSyncMode) -> &'static str {
+    match mode {
+        CaptionSyncMode::Off => "off",
+        CaptionSyncMode::Startup => "startup",
+        CaptionSyncMode::Continuous => "continuous",
     }
 }
 
@@ -221,6 +275,7 @@ pub fn run() -> eframe::Result<()> {
 
 fn renderer_backend(profile: RendererProfile) -> eframe::Renderer {
     match profile {
+        RendererProfile::Glow => eframe::Renderer::Glow,
         RendererProfile::WgpuDefault | RendererProfile::WgpuDx12 | RendererProfile::WgpuVulkan => {
             eframe::Renderer::Wgpu
         }
@@ -388,6 +443,8 @@ pub struct ProcessManagerApp {
     #[cfg(windows)]
     taskbar_icon_applied: bool,
     #[cfg(windows)]
+    native_caption_applied: bool,
+    #[cfg(windows)]
     taskbar_big_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
     #[cfg(windows)]
     taskbar_small_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
@@ -472,6 +529,8 @@ impl ProcessManagerApp {
             root_hwnd: extract_root_hwnd(cc),
             #[cfg(windows)]
             taskbar_icon_applied: false,
+            #[cfg(windows)]
+            native_caption_applied: false,
             #[cfg(windows)]
             taskbar_big_icon_handle: None,
             #[cfg(windows)]
@@ -2030,6 +2089,26 @@ impl ProcessManagerApp {
     }
 
     #[cfg(windows)]
+    fn ensure_windows_native_caption(&mut self) {
+        if self.native_caption_applied {
+            return;
+        }
+
+        let hwnd = self
+            .root_hwnd
+            .or_else(|| find_window_by_title(&self.current_title));
+        let Some(hwnd) = hwnd else {
+            return;
+        };
+
+        apply_windows_caption_theme(hwnd, self.shell_bg);
+        self.native_caption_applied = true;
+    }
+
+    #[cfg(not(windows))]
+    fn ensure_windows_native_caption(&mut self) {}
+
+    #[cfg(windows)]
     fn ensure_windows_taskbar_icon(&mut self) {
         if self.taskbar_icon_applied {
             return;
@@ -2089,6 +2168,7 @@ impl eframe::App for ProcessManagerApp {
         let update_started = Instant::now();
         self.ensure_valid_selection();
         self.update_title(ctx);
+        self.ensure_windows_native_caption();
         self.ensure_windows_taskbar_icon();
         let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
         let (viewport_pos, viewport_size) = ctx.input(|input| {
@@ -2174,22 +2254,21 @@ fn configure_visuals(ctx: &Context) {
     visuals.window_fill = PANEL_BG;
     visuals.extreme_bg_color = BODY_BG;
     visuals.faint_bg_color = PANEL_BG;
-    visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.noninteractive.bg_fill = SHELL_BG;
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_SOFT);
-    visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.inactive.bg_fill = SHELL_BG;
     visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.widgets.hovered.bg_fill = Color32::from_white_alpha(15);
+    visuals.widgets.hovered.bg_fill = SHELL_HOVER_BG;
     visuals.widgets.hovered.bg_stroke = Stroke::NONE;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    visuals.widgets.active.bg_fill = Color32::from_white_alpha(20);
+    visuals.widgets.active.bg_fill = SHELL_ACTIVE_BG;
     visuals.widgets.active.bg_stroke = Stroke::NONE;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
-    // Use a visible blue-tinted selection highlight
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(60, 110, 180, 100);
-    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 140, 210, 140));
-    visuals.window_shadow.color = Color32::from_black_alpha(90);
+    visuals.selection.bg_fill = Color32::from_rgb(56, 98, 158);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(86, 136, 198));
+    visuals.window_shadow.color = Color32::TRANSPARENT;
     ctx.set_visuals(visuals);
 
     ctx.style_mut(|style| {
@@ -2197,6 +2276,63 @@ fn configure_visuals(ctx: &Context) {
         style.spacing.item_spacing = Vec2::new(8.0, 6.0);
         style.spacing.indent = 16.0;
     });
+}
+
+#[cfg(windows)]
+fn apply_windows_caption_theme(hwnd: windows_sys::Win32::Foundation::HWND, color: Color32) {
+    use std::ffi::c_void;
+
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_CAPTION_COLOR: u32 = 35;
+    const DWMWA_TEXT_COLOR: u32 = 36;
+    const DWMWCP_ROUND: u32 = 2;
+
+    let dark_mode_enabled: i32 = (!is_light_color(color)) as i32;
+    let corner_preference = DWMWCP_ROUND;
+    let border_color = color_to_colorref(BORDER);
+    let caption_color = color_to_colorref(color);
+    let text_color = color_to_colorref(if is_light_color(color) {
+        Color32::from_rgb(24, 24, 24)
+    } else {
+        Color32::from_rgb(237, 237, 237)
+    });
+
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode_enabled as *const _ as *const c_void,
+            std::mem::size_of_val(&dark_mode_enabled) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner_preference as *const _ as *const c_void,
+            std::mem::size_of_val(&corner_preference) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border_color as *const _ as *const c_void,
+            std::mem::size_of_val(&border_color) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            &caption_color as *const _ as *const c_void,
+            std::mem::size_of_val(&caption_color) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TEXT_COLOR,
+            &text_color as *const _ as *const c_void,
+            std::mem::size_of_val(&text_color) as u32,
+        );
+    }
 }
 
 fn should_accept_caption_color(color: Color32) -> bool {
@@ -2215,8 +2351,22 @@ fn should_accept_caption_color(color: Color32) -> bool {
     luminance < 0.24 || saturation > 0.12
 }
 
+fn is_light_color(color: Color32) -> bool {
+    let r = color.r() as f32 / 255.0;
+    let g = color.g() as f32 / 255.0;
+    let b = color.b() as f32 / 255.0;
+    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    luminance >= 0.5
+}
+
+#[cfg(windows)]
+fn color_to_colorref(color: Color32) -> u32 {
+    (color.r() as u32) | ((color.g() as u32) << 8) | ((color.b() as u32) << 16)
+}
+
 fn configure_fonts(ctx: &Context) {
     let mut fonts = egui::FontDefinitions::default();
+    let mut loaded_segoe_ui = false;
 
     if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/segoeui.ttf") {
         fonts
@@ -2225,6 +2375,7 @@ fn configure_fonts(ctx: &Context) {
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             family.insert(0, "Segoe UI".into());
         }
+        loaded_segoe_ui = true;
     }
 
     // Segoe UI Symbol provides Unicode symbols and icons that Segoe UI lacks
@@ -2238,13 +2389,26 @@ fn configure_fonts(ctx: &Context) {
         }
     }
 
-    if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/CascadiaMono.ttf") {
-        fonts.font_data.insert(
-            "Cascadia Mono".into(),
-            egui::FontData::from_owned(bytes).into(),
-        );
+    let monospace_font = [
+        ("C:/Windows/Fonts/CascadiaMono.ttf", "Cascadia Mono"),
+        ("C:/Windows/Fonts/consola.ttf", "Consolas"),
+        ("C:/Windows/Fonts/lucon.ttf", "Lucida Console"),
+    ]
+    .into_iter()
+    .find_map(|(path, name)| {
+        std::fs::read(path)
+            .ok()
+            .map(|bytes| (name.to_string(), egui::FontData::from_owned(bytes)))
+    });
+
+    if let Some((name, font_data)) = monospace_font {
+        fonts.font_data.insert(name.clone(), font_data.into());
         if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            family.insert(0, "Cascadia Mono".into());
+            family.insert(0, name);
+        }
+    } else if loaded_segoe_ui {
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            family.insert(0, "Segoe UI".into());
         }
     }
 
@@ -2357,21 +2521,18 @@ fn chrome_text_button(
 ) -> egui::Response {
     ui.scope(|ui| {
         let visuals = &mut ui.style_mut().visuals;
-        visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+        visuals.widgets.inactive.bg_fill = SHELL_BG;
         visuals.widgets.inactive.bg_stroke = if show_idle_stroke {
-            Stroke::new(1.0, Color32::from_white_alpha(BUTTON_BORDER_ALPHA))
+            Stroke::new(1.0, SHELL_STROKE)
         } else {
             Stroke::NONE
         };
-        visuals.widgets.hovered.bg_fill = Color32::from_white_alpha(BUTTON_HOVER_ALPHA);
-        visuals.widgets.hovered.bg_stroke =
-            Stroke::new(1.0, Color32::from_white_alpha(BUTTON_BORDER_ALPHA));
-        visuals.widgets.active.bg_fill = Color32::from_white_alpha(BUTTON_ACTIVE_ALPHA);
-        visuals.widgets.active.bg_stroke =
-            Stroke::new(1.0, Color32::from_white_alpha(BUTTON_BORDER_ACTIVE_ALPHA));
-        visuals.widgets.open.bg_fill = Color32::from_white_alpha(BUTTON_ACTIVE_ALPHA);
-        visuals.widgets.open.bg_stroke =
-            Stroke::new(1.0, Color32::from_white_alpha(BUTTON_BORDER_ACTIVE_ALPHA));
+        visuals.widgets.hovered.bg_fill = SHELL_HOVER_BG;
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, SHELL_STROKE);
+        visuals.widgets.active.bg_fill = SHELL_ACTIVE_BG;
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0, SHELL_STROKE);
+        visuals.widgets.open.bg_fill = SHELL_ACTIVE_BG;
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0, SHELL_STROKE);
 
         ui.add(
             Button::new(RichText::new(label).color(text_color).size(font_size))
@@ -2397,9 +2558,9 @@ fn draw_process_row(
     let is_hovered = response.hovered();
 
     let base_bg_color = if selected {
-        Color32::from_white_alpha(15)
+        PROCESS_ROW_SELECTED_BG
     } else if is_hovered {
-        Color32::from_white_alpha(8)
+        PROCESS_ROW_HOVER_BG
     } else {
         Color32::TRANSPARENT
     };
@@ -2410,7 +2571,7 @@ fn draw_process_row(
     }
 
     if flash_intensity > 0.0 {
-        let stroke_color = blend_color(Color32::TRANSPARENT, DANGER, 0.92 * flash_intensity);
+        let stroke_color = blend_color(SHELL_BG, DANGER, 0.92 * flash_intensity);
         ui.painter().rect_stroke(
             rect,
             4.0,
@@ -2496,7 +2657,7 @@ fn draw_sidebar_footer_button(ui: &mut Ui, label: &str) -> egui::Response {
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
 
     let bg_color = if response.hovered() {
-        Color32::from_white_alpha(8)
+        PROCESS_ROW_HOVER_BG
     } else {
         Color32::TRANSPARENT
     };
@@ -2599,7 +2760,7 @@ fn modal_divider(ui: &mut Ui) {
     ui.painter().hline(
         rect.x_range(),
         rect.center().y,
-        Stroke::new(1.0, Color32::from_white_alpha(8)),
+        Stroke::new(1.0, SHELL_SUBTLE_STROKE),
     );
 }
 
@@ -2611,38 +2772,32 @@ where
     let response = ui
         .scope(|ui| {
             let visuals = &mut ui.style_mut().visuals;
-            visuals.widgets.inactive.bg_fill = if selected {
-                Color32::from_rgba_unmultiplied(92, 124, 170, 72)
-            } else {
-                Color32::TRANSPARENT
-            };
+            visuals.widgets.inactive.bg_fill = if selected { TAB_SELECTED_BG } else { SHELL_BG };
             visuals.widgets.inactive.bg_stroke = Stroke::new(
                 1.0,
                 if selected {
-                    Color32::from_rgba_unmultiplied(112, 150, 204, 110)
+                    TAB_SELECTED_STROKE
                 } else {
-                    Color32::from_white_alpha(8)
+                    SHELL_SUBTLE_STROKE
                 },
             );
             visuals.widgets.hovered.bg_fill = if selected {
-                Color32::from_rgba_unmultiplied(92, 124, 170, 88)
+                TAB_SELECTED_HOVER_BG
             } else {
-                Color32::from_white_alpha(10)
+                SHELL_HOVER_BG
             };
             visuals.widgets.hovered.bg_stroke = Stroke::new(
                 1.0,
                 if selected {
-                    Color32::from_rgba_unmultiplied(122, 160, 214, 130)
+                    TAB_SELECTED_STROKE
                 } else {
-                    Color32::from_white_alpha(18)
+                    SHELL_STROKE
                 },
             );
-            visuals.widgets.active.bg_fill = Color32::from_rgba_unmultiplied(92, 124, 170, 96);
-            visuals.widgets.active.bg_stroke =
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(122, 160, 214, 150));
-            visuals.widgets.open.bg_fill = Color32::from_rgba_unmultiplied(92, 124, 170, 96);
-            visuals.widgets.open.bg_stroke =
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(122, 160, 214, 150));
+            visuals.widgets.active.bg_fill = TAB_SELECTED_ACTIVE_BG;
+            visuals.widgets.active.bg_stroke = Stroke::new(1.0, TAB_SELECTED_STROKE);
+            visuals.widgets.open.bg_fill = TAB_SELECTED_ACTIVE_BG;
+            visuals.widgets.open.bg_stroke = Stroke::new(1.0, TAB_SELECTED_STROKE);
 
             ui.add(
                 Button::new(
@@ -2716,7 +2871,7 @@ fn modal_footer(ui: &mut Ui, add_actions: impl FnOnce(&mut Ui)) {
     ui.painter().hline(
         footer_rect.x_range(),
         footer_rect.top(),
-        Stroke::new(1.0, Color32::from_white_alpha(10)),
+        Stroke::new(1.0, SHELL_SUBTLE_STROKE),
     );
 
     let actions_rect = footer_rect.shrink2(egui::vec2(12.0, 14.0));

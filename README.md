@@ -247,6 +247,32 @@ cargo test
 cargo build --release
 ```
 
+## Troubleshooting Windows Rendering
+
+If the app feels sluggish on one Windows machine but not another, or it only repaints correctly after switching windows, the issue is usually the graphics backend rather than process management.
+
+Useful launch-time environment overrides:
+
+- `PM_RENDERER=wgpu-dx12` to force DirectX 12
+- `PM_RENDERER=wgpu-vulkan` to force Vulkan
+- `PM_RENDERER=glow` to use the OpenGL backend
+- `PM_VSYNC=false` to disable vsync
+- `PM_CAPTION_SYNC=startup` or `PM_CAPTION_SYNC=continuous` to re-enable Windows title-bar color sampling if you specifically want that cosmetic behavior
+- `PM_DIAGNOSTICS=true` to write a diagnostics log next to the executable
+
+Examples in PowerShell:
+
+```powershell
+$env:PM_RENDERER = "wgpu-dx12"
+.\simple-rust-process-manager.exe
+```
+
+```powershell
+$env:PM_RENDERER = "glow"
+$env:PM_DIAGNOSTICS = "true"
+.\simple-rust-process-manager.exe
+```
+
 ## Stack
 
 - `Rust`: application code and native desktop packaging

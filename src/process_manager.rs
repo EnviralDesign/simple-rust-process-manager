@@ -474,8 +474,42 @@ impl ProcessManager {
                         let error_version = error_version.clone();
                         let process_error_versions = process_error_versions.clone();
                         thread::spawn(move || {
-                            let reader = BufReader::new(stdout);
-                            for line in reader.lines().map_while(Result::ok) {
+                            let mut reader = BufReader::new(stdout);
+                            let mut buffer = Vec::new();
+                            loop {
+                                buffer.clear();
+                                let read = match reader.read_until(b'\n', &mut buffer) {
+                                    Ok(read) => read,
+                                    Err(err) => {
+                                        let (updated, has_error) = append_runtime_log(
+                                            &processes_clone,
+                                            &id_clone,
+                                            format!("[stdout reader error: {}]", err),
+                                            true,
+                                        );
+                                        if updated {
+                                            if has_error {
+                                                bump_error(
+                                                    &error_version,
+                                                    &process_error_versions,
+                                                    &id_clone,
+                                                );
+                                            }
+                                            bump_event(&event_tx, &event_version);
+                                        }
+                                        break;
+                                    }
+                                };
+                                if read == 0 {
+                                    break;
+                                }
+                                while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                                    buffer.pop();
+                                }
+                                let line = String::from_utf8_lossy(&buffer).into_owned();
+                                if line.is_empty() {
+                                    continue;
+                                }
                                 let (updated, has_error) =
                                     append_runtime_log(&processes_clone, &id_clone, line, false);
                                 if updated {
@@ -501,8 +535,42 @@ impl ProcessManager {
                         let error_version = error_version.clone();
                         let process_error_versions = process_error_versions.clone();
                         thread::spawn(move || {
-                            let reader = BufReader::new(stderr);
-                            for line in reader.lines().map_while(Result::ok) {
+                            let mut reader = BufReader::new(stderr);
+                            let mut buffer = Vec::new();
+                            loop {
+                                buffer.clear();
+                                let read = match reader.read_until(b'\n', &mut buffer) {
+                                    Ok(read) => read,
+                                    Err(err) => {
+                                        let (updated, has_error) = append_runtime_log(
+                                            &processes_clone,
+                                            &id_clone,
+                                            format!("[stderr reader error: {}]", err),
+                                            true,
+                                        );
+                                        if updated {
+                                            if has_error {
+                                                bump_error(
+                                                    &error_version,
+                                                    &process_error_versions,
+                                                    &id_clone,
+                                                );
+                                            }
+                                            bump_event(&event_tx, &event_version);
+                                        }
+                                        break;
+                                    }
+                                };
+                                if read == 0 {
+                                    break;
+                                }
+                                while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                                    buffer.pop();
+                                }
+                                let line = String::from_utf8_lossy(&buffer).into_owned();
+                                if line.is_empty() {
+                                    continue;
+                                }
                                 let (updated, has_error) =
                                     append_runtime_log(&processes_clone, &id_clone, line, true);
                                 if updated {
@@ -752,23 +820,53 @@ impl ProcessManager {
 
             if let Ok(mut child) = cmd.spawn() {
                 if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines().map_while(Result::ok) {
+                    let mut reader = BufReader::new(stdout);
+                    let mut buffer = Vec::new();
+                    loop {
+                        buffer.clear();
+                        let read = match reader.read_until(b'\n', &mut buffer) {
+                            Ok(read) => read,
+                            Err(err) => {
+                                let (updated, has_error) = append_runtime_log(
+                                    &processes_arc,
+                                    &id_owned,
+                                    format!("[docker log reader error: {}]", err),
+                                    true,
+                                );
+                                if updated {
+                                    if has_error {
+                                        bump_error(&error_version, &process_error_versions, &id_owned);
+                                    }
+                                    bump_event(&event_tx, &event_version);
+                                }
+                                break;
+                            }
+                        };
+                        if read == 0 {
+                            break;
+                        }
+                        while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                            buffer.pop();
+                        }
+                        let line = String::from_utf8_lossy(&buffer).into_owned();
+                        if line.is_empty() {
+                            continue;
+                        }
                         let mut should_break = false;
-                        let (updated, has_error) = {
+                        let (updated, has_error, disk_log, formatted) = {
                             let mut updated = false;
                             let mut has_error = false;
+                            let mut disk_log = None;
+                            let mut formatted = String::new();
                             let mut processes = processes_arc.lock().unwrap();
                             if let Some(state) = processes.get_mut(&id_owned) {
                                 if state.status != ProcessStatus::Running {
                                     should_break = true;
                                 } else {
-                                    let formatted = line.clone();
+                                    formatted = line.clone();
                                     has_error = line_has_error(&formatted);
-                                    if let Some(file) = state.disk_log.clone() {
-                                        write_disk_log_line(&file, &formatted);
-                                    }
-                                    push_in_memory_log(&mut state.logs, formatted);
+                                    disk_log = state.disk_log.clone();
+                                    push_in_memory_log(&mut state.logs, formatted.clone());
                                     updated = true;
                                 }
                             } else {
@@ -776,8 +874,11 @@ impl ProcessManager {
                                 updated = false;
                                 has_error = false;
                             }
-                            (updated, has_error)
+                            (updated, has_error, disk_log, formatted)
                         };
+                        if let Some(file) = disk_log {
+                            write_disk_log_line(&file, &formatted);
+                        }
                         if updated {
                             if has_error {
                                 bump_error(&error_version, &process_error_versions, &id_owned);
@@ -1156,22 +1257,27 @@ fn append_runtime_log(
     line: String,
     is_stderr: bool,
 ) -> (bool, bool) {
-    let mut processes = processes.lock().unwrap();
-    let Some(state) = processes.get_mut(process_id) else {
-        return (false, false);
+    let (disk_log, formatted, has_error) = {
+        let mut processes = processes.lock().unwrap();
+        let Some(state) = processes.get_mut(process_id) else {
+            return (false, false);
+        };
+
+        let sanitized = sanitize_runtime_log_line(&line);
+        let formatted = if is_stderr {
+            format!("[stderr] {}", sanitized)
+        } else {
+            sanitized
+        };
+        let has_error = line_has_error(&formatted);
+        let disk_log = state.disk_log.clone();
+        push_in_memory_log(&mut state.logs, formatted.clone());
+        (disk_log, formatted, has_error)
     };
 
-    let formatted = if is_stderr {
-        format!("[stderr] {}", line)
-    } else {
-        line
-    };
-    let has_error = line_has_error(&formatted);
-
-    if let Some(file) = state.disk_log.clone() {
+    if let Some(file) = disk_log {
         write_disk_log_line(&file, &formatted);
     }
-    push_in_memory_log(&mut state.logs, formatted);
 
     (true, has_error)
 }
@@ -1195,6 +1301,46 @@ fn write_disk_log_line(file: &SharedLogFile, line: &str) {
         let _ = writeln!(file, "{}", line);
         let _ = file.flush();
     }
+}
+
+fn sanitize_runtime_log_line(line: &str) -> String {
+    let mut sanitized = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    let mut prev = '\0';
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' || (prev == '\u{1b}' && next == '\\') {
+                            break;
+                        }
+                        prev = next;
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if matches!(ch, '\0'..='\u{08}' | '\u{0b}'..='\u{1a}' | '\u{1c}'..='\u{1f}' | '\u{7f}') {
+            continue;
+        }
+
+        sanitized.push(ch);
+    }
+
+    sanitized
 }
 
 fn create_disk_log_session(
@@ -1801,5 +1947,22 @@ fn refresh_docker_status_inner(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_runtime_log_line;
+
+    #[test]
+    fn strips_ansi_csi_sequences() {
+        let line = "\u{1b}[32mready in\u{1b}[39m \u{1b}[1m406\u{1b}[22m ms";
+        assert_eq!(sanitize_runtime_log_line(line), "ready in 406 ms");
+    }
+
+    #[test]
+    fn strips_ansi_osc_sequences() {
+        let line = "\u{1b}]0;Process Manager\u{7}server started";
+        assert_eq!(sanitize_runtime_log_line(line), "server started");
     }
 }
