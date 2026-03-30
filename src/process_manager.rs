@@ -835,7 +835,11 @@ impl ProcessManager {
                                 );
                                 if updated {
                                     if has_error {
-                                        bump_error(&error_version, &process_error_versions, &id_owned);
+                                        bump_error(
+                                            &error_version,
+                                            &process_error_versions,
+                                            &id_owned,
+                                        );
                                     }
                                     bump_event(&event_tx, &event_version);
                                 }
