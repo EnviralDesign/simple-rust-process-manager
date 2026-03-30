@@ -225,4 +225,30 @@ impl AppConfig {
             *process = updated;
         }
     }
+
+    /// Move a process one slot earlier in the list.
+    pub fn move_process_up(&mut self, id: &str) -> bool {
+        let Some(index) = self.processes.iter().position(|process| process.id == id) else {
+            return false;
+        };
+        if index == 0 {
+            return false;
+        }
+
+        self.processes.swap(index, index - 1);
+        true
+    }
+
+    /// Move a process one slot later in the list.
+    pub fn move_process_down(&mut self, id: &str) -> bool {
+        let Some(index) = self.processes.iter().position(|process| process.id == id) else {
+            return false;
+        };
+        if index + 1 >= self.processes.len() {
+            return false;
+        }
+
+        self.processes.swap(index, index + 1);
+        true
+    }
 }

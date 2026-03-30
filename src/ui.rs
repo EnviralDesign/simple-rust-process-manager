@@ -842,6 +842,20 @@ impl ProcessManagerApp {
         self.set_banner("Process deleted.");
     }
 
+    fn move_process_up(&mut self, process_id: &str) {
+        if self.config.move_process_up(process_id) {
+            self.persist_config();
+            self.set_banner("Process moved up.");
+        }
+    }
+
+    fn move_process_down(&mut self, process_id: &str) {
+        if self.config.move_process_down(process_id) {
+            self.persist_config();
+            self.set_banner("Process moved down.");
+        }
+    }
+
     fn selected_process_config(&self) -> Option<ProcessConfig> {
         self.selected_process
             .as_ref()
@@ -1393,7 +1407,13 @@ impl ProcessManagerApp {
                         ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                for process in self.config.processes.clone() {
+                                let process_count = self.config.processes.len();
+                                let mut move_up_id: Option<String> = None;
+                                let mut move_down_id: Option<String> = None;
+
+                                for (index, process) in
+                                    self.config.processes.clone().into_iter().enumerate()
+                                {
                                     let status = self
                                         .runtime_snapshot
                                         .statuses
@@ -1404,19 +1424,44 @@ impl ProcessManagerApp {
                                         == Some(process.id.as_str());
                                     let flash_intensity =
                                         self.process_row_flash_intensity(ctx, &process.id);
-                                    if draw_process_row(
+                                    let row_response = draw_process_row(
                                         ui,
                                         &process,
                                         &status,
                                         is_selected,
                                         flash_intensity,
-                                    )
-                                    .clicked()
-                                    {
+                                    );
+                                    let row_clicked = row_response.clicked();
+                                    row_response.context_menu(|ui| {
+                                        let can_move_up = index > 0;
+                                        let can_move_down = index + 1 < process_count;
+
+                                        if ui
+                                            .add_enabled(can_move_up, Button::new("Move up"))
+                                            .clicked()
+                                        {
+                                            move_up_id = Some(process.id.clone());
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add_enabled(can_move_down, Button::new("Move down"))
+                                            .clicked()
+                                        {
+                                            move_down_id = Some(process.id.clone());
+                                            ui.close();
+                                        }
+                                    });
+                                    if row_clicked {
                                         self.selected_process = Some(process.id.clone());
                                         self.refresh_runtime_snapshot(true);
                                     }
                                     ui.add_space(2.0);
+                                }
+
+                                if let Some(process_id) = move_up_id {
+                                    self.move_process_up(&process_id);
+                                } else if let Some(process_id) = move_down_id {
+                                    self.move_process_down(&process_id);
                                 }
                             });
                     });
@@ -1482,95 +1527,119 @@ impl ProcessManagerApp {
         let logs = &self.runtime_snapshot.selected_logs;
         let auto_start = if process.auto_start { "ON" } else { "OFF" };
         let managed_restart = if process.auto_restart { "ON" } else { "OFF" };
+        let metadata = format!(
+            "{} | {} | auto-start {} | restart {}",
+            match &process.process_type {
+                ProcessType::Process => "Process",
+                ProcessType::Docker => "Docker",
+            },
+            &process.command,
+            auto_start,
+            managed_restart
+        );
         let mut action_start = false;
         let mut action_stop = false;
         let mut action_restart = false;
         let mut action_edit = false;
         let mut action_delete = false;
 
-        // Single compact header row: metadata left, action buttons right
+        // Single compact header row: process actions left, metadata uses the remaining space.
         egui::Frame::default()
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::NONE)
             .inner_margin(egui::Margin::symmetric(CONTENT_GUTTER_X, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let type_label = match &process.process_type {
-                        ProcessType::Process => "Process",
-                        ProcessType::Docker => "Docker",
-                    };
-                    ui.label(
-                        RichText::new(format!(
-                            "{} | {} | auto-start {} | restart {}",
-                            type_label, &process.command, auto_start, managed_restart
-                        ))
-                        .color(TEXT_MUTED)
-                        .size(11.5),
+                    let action_width = ui.available_width().min(360.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(action_width, 28.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if chrome_text_button(
+                                ui,
+                                "▶ Start",
+                                TOOLBAR_GREEN,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_start = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "■ Stop",
+                                TOOLBAR_GRAY,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_stop = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "⟳ Restart",
+                                TOOLBAR_YELLOW,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_restart = true;
+                            }
+                            ui.add_space(2.0);
+                            let (sep_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(1.0, 18.0), egui::Sense::hover());
+                            ui.painter().vline(
+                                sep_rect.center().x,
+                                sep_rect.y_range(),
+                                Stroke::new(1.0, Color32::from_white_alpha(15)),
+                            );
+                            ui.add_space(2.0);
+                            if chrome_text_button(
+                                ui,
+                                "⚙ Edit",
+                                TOOLBAR_TEXT,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_edit = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "✕ Delete",
+                                TOOLBAR_RED,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_delete = true;
+                            }
+                        },
                     );
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if chrome_text_button(
-                            ui,
-                            "✕ Delete",
-                            TOOLBAR_RED,
-                            Vec2::new(0.0, 28.0),
-                            12.0,
-                            false,
+                    ui.add_space(10.0);
+
+                    let metadata_response = ui.add_sized(
+                        Vec2::new(ui.available_width().max(0.0), 28.0),
+                        egui::Label::new(
+                            RichText::new(metadata.as_str())
+                                .color(TEXT_MUTED)
+                                .size(11.5),
                         )
-                        .clicked()
-                        {
-                            action_delete = true;
-                        }
-                        if chrome_text_button(
-                            ui,
-                            "⚙ Edit",
-                            TOOLBAR_TEXT,
-                            Vec2::new(0.0, 28.0),
-                            12.0,
-                            false,
-                        )
-                        .clicked()
-                        {
-                            action_edit = true;
-                        }
-                        ui.add_space(4.0);
-                        if chrome_text_button(
-                            ui,
-                            "⟳ Restart",
-                            TOOLBAR_YELLOW,
-                            Vec2::new(0.0, 28.0),
-                            12.0,
-                            false,
-                        )
-                        .clicked()
-                        {
-                            action_restart = true;
-                        }
-                        if chrome_text_button(
-                            ui,
-                            "■ Stop",
-                            TOOLBAR_GRAY,
-                            Vec2::new(0.0, 28.0),
-                            12.0,
-                            false,
-                        )
-                        .clicked()
-                        {
-                            action_stop = true;
-                        }
-                        if chrome_text_button(
-                            ui,
-                            "▶ Start",
-                            TOOLBAR_GREEN,
-                            Vec2::new(0.0, 28.0),
-                            12.0,
-                            false,
-                        )
-                        .clicked()
-                        {
-                            action_start = true;
-                        }
-                    });
+                        .truncate(),
+                    );
+                    metadata_response.on_hover_text(metadata);
                 });
 
                 // Thin separator
@@ -2628,6 +2697,7 @@ fn draw_process_row(
     if process.auto_restart {
         hover_lines.push("Managed restart enabled".to_string());
     }
+    hover_lines.push("Right-click to reorder".to_string());
 
     response.on_hover_text(hover_lines.join("\n"))
 }

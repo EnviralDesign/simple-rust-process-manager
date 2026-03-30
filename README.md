@@ -35,6 +35,7 @@ Highlights visible here:
 - `(M)` marks entries with managed restart enabled
 - `(A)` marks entries that auto-start when the app launches
 - `Start All`, `Stop All`, and `Restart All` control the whole stack
+- right-click any process in the sidebar to move it up or down
 - the selected process shows live output with warning/error color differentiation
 - the header can expose a loopback API and copy an agent bootstrap payload
 
@@ -82,6 +83,7 @@ This panel controls:
 
 - Start, stop, and restart the whole stack from the header.
 - Start, stop, restart, edit, or delete individual entries from the process pane.
+- Reorder processes from the sidebar with a right-click `Move up` / `Move down` menu.
 - Keep a mixed stack of regular commands and Docker containers in one place.
 
 ### Live Logs
@@ -141,7 +143,8 @@ See the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/
    - managed restart
    - disk logging
 5. Select a process in the left sidebar to watch its logs.
-6. Use stack-wide controls in the header when you want to bring everything up or down together.
+6. Right-click a process in the sidebar if you want to move it up or down in the list.
+7. Use stack-wide controls in the header when you want to bring everything up or down together.
 
 ## Command Model
 
