@@ -332,6 +332,9 @@ struct ProcessDraft {
     process_type: ProcessType,
     auto_start: bool,
     auto_restart: bool,
+    respond_to_start_all: bool,
+    respond_to_stop_all: bool,
+    respond_to_restart_all: bool,
     log_to_disk: bool,
     log_rotation_count: String,
 }
@@ -345,6 +348,9 @@ impl Default for ProcessDraft {
             process_type: ProcessType::Process,
             auto_start: false,
             auto_restart: false,
+            respond_to_start_all: true,
+            respond_to_stop_all: true,
+            respond_to_restart_all: true,
             log_to_disk: false,
             log_rotation_count: DEFAULT_LOG_ROTATION_COUNT.to_string(),
         }
@@ -360,6 +366,9 @@ impl ProcessDraft {
             process_type: process.process_type.clone(),
             auto_start: process.auto_start,
             auto_restart: process.auto_restart,
+            respond_to_start_all: process.respond_to_start_all,
+            respond_to_stop_all: process.respond_to_stop_all,
+            respond_to_restart_all: process.respond_to_restart_all,
             log_to_disk: process.log_to_disk,
             log_rotation_count: process.log_rotation_count.to_string(),
         }
@@ -738,6 +747,9 @@ impl ProcessManagerApp {
                 );
                 process.auto_start = form.auto_start;
                 process.auto_restart = form.auto_restart;
+                process.respond_to_start_all = form.respond_to_start_all;
+                process.respond_to_stop_all = form.respond_to_stop_all;
+                process.respond_to_restart_all = form.respond_to_restart_all;
                 process.log_to_disk = form.log_to_disk;
                 process.log_rotation_count = log_rotation_count;
 
@@ -779,6 +791,9 @@ impl ProcessManagerApp {
                     process_type: form.process_type,
                     auto_start: form.auto_start,
                     auto_restart: form.auto_restart,
+                    respond_to_start_all: form.respond_to_start_all,
+                    respond_to_stop_all: form.respond_to_stop_all,
+                    respond_to_restart_all: form.respond_to_restart_all,
                     log_to_disk: form.log_to_disk,
                     log_rotation_count,
                 };
@@ -1527,15 +1542,17 @@ impl ProcessManagerApp {
         let logs = &self.runtime_snapshot.selected_logs;
         let auto_start = if process.auto_start { "ON" } else { "OFF" };
         let managed_restart = if process.auto_restart { "ON" } else { "OFF" };
+        let global_controls = global_controls_summary(process);
         let metadata = format!(
-            "{} | {} | auto-start {} | restart {}",
+            "{} | {} | auto-start {} | restart {} | global {}",
             match &process.process_type {
                 ProcessType::Process => "Process",
                 ProcessType::Docker => "Docker",
             },
             &process.command,
             auto_start,
-            managed_restart
+            managed_restart,
+            global_controls
         );
         let mut action_start = false;
         let mut action_stop = false;
@@ -1836,6 +1853,30 @@ impl ProcessManagerApp {
                                             &mut form.auto_restart,
                                             "Managed restart",
                                             Some("Automatically restart this entry if it goes down."),
+                                        );
+
+                                        ui.add_space(14.0);
+                                        modal_checkbox_row(
+                                            ui,
+                                            &mut form.respond_to_start_all,
+                                            "Respond to Start All",
+                                            Some("Allow the header Start All button and stack start API action to start this entry."),
+                                        );
+
+                                        ui.add_space(14.0);
+                                        modal_checkbox_row(
+                                            ui,
+                                            &mut form.respond_to_stop_all,
+                                            "Respond to Stop All",
+                                            Some("Allow the header Stop All button and stack stop API action to stop this entry."),
+                                        );
+
+                                        ui.add_space(14.0);
+                                        modal_checkbox_row(
+                                            ui,
+                                            &mut form.respond_to_restart_all,
+                                            "Respond to Restart All",
+                                            Some("Allow the header Restart All button and stack restart API action to restart this entry."),
                                         );
 
                                         ui.add_space(14.0);
@@ -2697,6 +2738,13 @@ fn draw_process_row(
     if process.auto_restart {
         hover_lines.push("Managed restart enabled".to_string());
     }
+    let skipped_global_controls = skipped_global_controls(process);
+    if !skipped_global_controls.is_empty() {
+        hover_lines.push(format!(
+            "Ignores global: {}",
+            skipped_global_controls.join(", ")
+        ));
+    }
     hover_lines.push("Right-click to reorder".to_string());
 
     response.on_hover_text(hover_lines.join("\n"))
@@ -2720,6 +2768,32 @@ fn process_markers(process: &ProcessConfig) -> Option<String> {
     } else {
         Some(format!(" ({})", markers.join(",")))
     }
+}
+
+fn global_controls_summary(process: &ProcessConfig) -> &'static str {
+    match (
+        process.respond_to_start_all,
+        process.respond_to_stop_all,
+        process.respond_to_restart_all,
+    ) {
+        (true, true, true) => "all",
+        (false, false, false) => "ignored",
+        _ => "custom",
+    }
+}
+
+fn skipped_global_controls(process: &ProcessConfig) -> Vec<&'static str> {
+    let mut skipped = Vec::new();
+    if !process.respond_to_start_all {
+        skipped.push("Start All");
+    }
+    if !process.respond_to_stop_all {
+        skipped.push("Stop All");
+    }
+    if !process.respond_to_restart_all {
+        skipped.push("Restart All");
+    }
+    skipped
 }
 
 fn draw_sidebar_footer_button(ui: &mut Ui, label: &str) -> egui::Response {

@@ -34,7 +34,7 @@ Highlights visible here:
 
 - `(M)` marks entries with managed restart enabled
 - `(A)` marks entries that auto-start when the app launches
-- `Start All`, `Stop All`, and `Restart All` control the whole stack
+- `Start All`, `Stop All`, and `Restart All` control entries that opt into each global action
 - right-click any process in the sidebar to move it up or down
 - the selected process shows live output with warning/error color differentiation
 - the header can expose a loopback API and copy an agent bootstrap payload
@@ -51,6 +51,7 @@ This screen covers:
 - process vs Docker mode
 - auto-start with app launch
 - managed restart
+- Start All / Stop All / Restart All participation
 - disk log capture and retention
 
 ### Global Settings: Process Manager
@@ -84,6 +85,7 @@ This panel controls:
 - Start, stop, and restart the whole stack from the header.
 - Start, stop, restart, edit, or delete individual entries from the process pane.
 - Reorder processes from the sidebar with a right-click `Move up` / `Move down` menu.
+- Keep one-off/manual entries independent by disabling their Start All, Stop All, and Restart All participation.
 - Keep a mixed stack of regular commands and Docker containers in one place.
 
 ### Live Logs
@@ -96,6 +98,7 @@ This panel controls:
 
 - Enable managed restart per entry for processes that should come back automatically.
 - Enable auto-start per entry when you want the stack to come up automatically after Process Manager launches.
+- Disable global Start All, Stop All, or Restart All participation per entry without affecting manual controls, auto-start, or managed restart.
 - On Windows, stop entire process trees with Job Objects so children are not orphaned.
 - Keep Docker behavior explicit: regular processes are shut down on app close, containers persist unless you stop them.
 
@@ -141,6 +144,7 @@ See the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/
 4. Optionally enable:
    - auto-start with app launch
    - managed restart
+   - Start All / Stop All / Restart All participation
    - disk logging
 5. Select a process in the left sidebar to watch its logs.
 6. Right-click a process in the sidebar if you want to move it up or down in the list.
@@ -181,6 +185,9 @@ Example:
       "process_type": "Process",
       "auto_start": false,
       "auto_restart": true,
+      "respond_to_start_all": true,
+      "respond_to_stop_all": true,
+      "respond_to_restart_all": true,
       "log_to_disk": true,
       "log_rotation_count": 10
     },
@@ -192,6 +199,9 @@ Example:
       "process_type": "Docker",
       "auto_start": false,
       "auto_restart": false,
+      "respond_to_start_all": true,
+      "respond_to_stop_all": true,
+      "respond_to_restart_all": true,
       "log_to_disk": false,
       "log_rotation_count": 10
     }
@@ -203,6 +213,7 @@ Notes:
 
 - `log_directory` is the shared base folder for persisted logs
 - `.` resolves next to the executable
+- `respond_to_start_all`, `respond_to_stop_all`, and `respond_to_restart_all` default to `true` for older configs
 - older config versions are migrated automatically on startup
 
 ## Local REST API

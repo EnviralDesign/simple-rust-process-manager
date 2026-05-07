@@ -458,17 +458,17 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
             EndpointDoc {
                 method: "POST",
                 path: "/stack/start",
-                description: "Starts all managed processes and containers.",
+                description: "Starts entries that opt into Start All.",
             },
             EndpointDoc {
                 method: "POST",
                 path: "/stack/stop",
-                description: "Stops all managed processes and containers.",
+                description: "Stops entries that opt into Stop All.",
             },
             EndpointDoc {
                 method: "POST",
                 path: "/stack/restart",
-                description: "Restarts the full stack.",
+                description: "Restarts entries that opt into Restart All.",
             },
             EndpointDoc {
                 method: "POST",
@@ -576,7 +576,7 @@ pub fn build_agent_bootstrap(
         "2. Call GET /processes to discover process ids and current statuses.".to_string(),
         "3. Call GET /processes/{id}/logs?limit=200 to fetch the latest log tail for a component."
             .to_string(),
-        "4. Use POST /stack/start, /stack/stop, or /stack/restart for the full stack.".to_string(),
+        "4. Use POST /stack/start, /stack/stop, or /stack/restart for entries that opt into each stack control.".to_string(),
         "5. Use POST /processes/{id}/start, /stop, or /restart for a single component.".to_string(),
         "6. After any POST, poll GET /processes until the desired state is visible.".to_string(),
         String::new(),
@@ -601,13 +601,16 @@ pub fn build_agent_bootstrap(
     } else {
         for process in processes {
             lines.push(format!(
-                "- {} | id={} | type={} | status={} | auto_start={} | auto_restart={}",
+                "- {} | id={} | type={} | status={} | auto_start={} | auto_restart={} | stack_start={} | stack_stop={} | stack_restart={}",
                 process.name,
                 process.id,
                 process.process_type,
                 process.status,
                 process.auto_start,
-                process.auto_restart
+                process.auto_restart,
+                process.respond_to_start_all,
+                process.respond_to_stop_all,
+                process.respond_to_restart_all
             ));
         }
     }

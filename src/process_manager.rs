@@ -80,6 +80,9 @@ pub struct ProcessRuntimeSnapshot {
     pub status_detail: Option<String>,
     pub auto_start: bool,
     pub auto_restart: bool,
+    pub respond_to_start_all: bool,
+    pub respond_to_stop_all: bool,
+    pub respond_to_restart_all: bool,
     pub command: String,
     pub working_directory: String,
 }
@@ -1050,7 +1053,11 @@ impl ProcessManager {
     pub fn start_all(&self) {
         let ids: Vec<String> = {
             let processes = self.processes.lock().unwrap();
-            processes.keys().cloned().collect()
+            processes
+                .iter()
+                .filter(|(_, state)| state.config.respond_to_start_all)
+                .map(|(id, _)| id.clone())
+                .collect()
         };
         for id in ids {
             self.start_process(&id);
@@ -1077,7 +1084,11 @@ impl ProcessManager {
     pub fn stop_all(&self) {
         let ids: Vec<String> = {
             let processes = self.processes.lock().unwrap();
-            processes.keys().cloned().collect()
+            processes
+                .iter()
+                .filter(|(_, state)| state.config.respond_to_stop_all)
+                .map(|(id, _)| id.clone())
+                .collect()
         };
         for id in ids {
             self.stop_process(&id);
@@ -1086,16 +1097,29 @@ impl ProcessManager {
 
     /// Restart all processes
     pub fn restart_all(&self) {
-        self.stop_all();
+        let ids: Vec<String> = {
+            let processes = self.processes.lock().unwrap();
+            processes
+                .iter()
+                .filter(|(_, state)| state.config.respond_to_restart_all)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        for id in &ids {
+            self.stop_process(id);
+        }
 
         // Wait for all processes to stop (max 5 seconds)
         let start = std::time::Instant::now();
         loop {
             let all_stopped = {
                 let processes = self.processes.lock().unwrap();
-                processes.values().all(|p| {
-                    p.status == ProcessStatus::Stopped
-                        || matches!(p.status, ProcessStatus::Error(_))
+                ids.iter().all(|id| {
+                    processes.get(id).map_or(true, |p| {
+                        p.status == ProcessStatus::Stopped
+                            || matches!(p.status, ProcessStatus::Error(_))
+                    })
                 })
             };
 
@@ -1111,7 +1135,9 @@ impl ProcessManager {
             thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        self.start_all();
+        for id in ids {
+            self.start_process(&id);
+        }
     }
 
     /// Stop all non-Docker processes (called on app shutdown)
@@ -1460,6 +1486,9 @@ fn process_snapshot_from_state(state: &ProcessState) -> ProcessRuntimeSnapshot {
         status_detail,
         auto_start: state.config.auto_start,
         auto_restart: state.config.auto_restart,
+        respond_to_start_all: state.config.respond_to_start_all,
+        respond_to_stop_all: state.config.respond_to_stop_all,
+        respond_to_restart_all: state.config.respond_to_restart_all,
         command: state.config.command.clone(),
         working_directory: state.config.working_directory.clone(),
     }

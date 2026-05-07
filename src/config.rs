@@ -55,6 +55,15 @@ pub struct ProcessConfig {
     /// Whether to auto-restart when the process exits unexpectedly
     #[serde(default)]
     pub auto_restart: bool,
+    /// Whether Start All should start this process
+    #[serde(default = "default_global_control_enabled")]
+    pub respond_to_start_all: bool,
+    /// Whether Stop All should stop this process
+    #[serde(default = "default_global_control_enabled")]
+    pub respond_to_stop_all: bool,
+    /// Whether Restart All should restart this process
+    #[serde(default = "default_global_control_enabled")]
+    pub respond_to_restart_all: bool,
     /// Whether to persist process logs to disk
     #[serde(default)]
     pub log_to_disk: bool,
@@ -78,6 +87,9 @@ impl ProcessConfig {
             process_type,
             auto_start: false,
             auto_restart: false,
+            respond_to_start_all: true,
+            respond_to_stop_all: true,
+            respond_to_restart_all: true,
             log_to_disk: false,
             log_rotation_count: default_log_rotation_count(),
         }
@@ -86,6 +98,10 @@ impl ProcessConfig {
 
 fn default_log_rotation_count() -> usize {
     DEFAULT_LOG_ROTATION_COUNT
+}
+
+fn default_global_control_enabled() -> bool {
+    true
 }
 
 /// Configuration for the optional localhost REST control surface
