@@ -426,6 +426,23 @@ struct TimedFlash {
     until: Instant,
 }
 
+#[derive(Clone, Debug)]
+struct LogSelection {
+    process_id: String,
+    anchor: usize,
+    focus: usize,
+}
+
+impl LogSelection {
+    fn range(&self) -> (usize, usize) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+}
+
 pub struct ProcessManagerApp {
     toggles: RuntimeToggles,
     runtime: Runtime,
@@ -443,6 +460,7 @@ pub struct ProcessManagerApp {
     banner: Option<(String, Instant)>,
     copy_feedback_until: Option<Instant>,
     stick_logs_to_bottom: bool,
+    log_selection: Option<LogSelection>,
     last_error_version: u64,
     last_process_error_versions: HashMap<String, u64>,
     process_row_flashes: HashMap<String, TimedFlash>,
@@ -530,6 +548,7 @@ impl ProcessManagerApp {
             banner: None,
             copy_feedback_until: None,
             stick_logs_to_bottom: true,
+            log_selection: None,
             last_error_version: 0,
             last_process_error_versions,
             process_row_flashes: HashMap::new(),
@@ -887,6 +906,7 @@ impl ProcessManagerApp {
 
         if selected_changed {
             self.stick_logs_to_bottom = true;
+            self.log_selection = None;
         }
 
         let started = Instant::now();
@@ -898,6 +918,93 @@ impl ProcessManagerApp {
         self.record_snapshot_refresh(started.elapsed());
     }
 
+    fn select_log_line(&mut self, process_id: &str, log_index: usize, extend_range: bool) {
+        if extend_range {
+            if let Some(selection) = self
+                .log_selection
+                .as_mut()
+                .filter(|selection| selection.process_id == process_id)
+            {
+                selection.focus = log_index;
+                return;
+            }
+        }
+
+        self.log_selection = Some(LogSelection {
+            process_id: process_id.to_string(),
+            anchor: log_index,
+            focus: log_index,
+        });
+    }
+
+    fn selected_log_range(&self, process_id: &str) -> Option<(usize, usize)> {
+        self.log_selection
+            .as_ref()
+            .filter(|selection| selection.process_id == process_id)
+            .map(LogSelection::range)
+    }
+
+    fn visible_selected_log_count(
+        &self,
+        process_id: &str,
+        visible_start: usize,
+        visible_len: usize,
+    ) -> usize {
+        let Some((start, end)) = self.selected_log_range(process_id) else {
+            return 0;
+        };
+        let Some(visible_end) = visible_start.checked_add(visible_len.saturating_sub(1)) else {
+            return 0;
+        };
+        if visible_len == 0 || end < visible_start || start > visible_end {
+            return 0;
+        }
+        end.min(visible_end) - start.max(visible_start) + 1
+    }
+
+    fn clear_log_selection(&mut self) {
+        self.log_selection = None;
+    }
+
+    fn copy_selected_logs(&mut self) {
+        let Some(process_id) = self.selected_process.as_deref() else {
+            return;
+        };
+        let Some((selection_start, selection_end)) = self.selected_log_range(process_id) else {
+            return;
+        };
+
+        let logs = &self.runtime_snapshot.selected_logs;
+        if logs.is_empty() {
+            return;
+        }
+
+        let visible_start = self
+            .runtime_snapshot
+            .selected_log_count
+            .saturating_sub(logs.len());
+        let visible_end = visible_start + logs.len() - 1;
+        if selection_end < visible_start || selection_start > visible_end {
+            self.set_banner("Selected logs are no longer in memory.");
+            self.clear_log_selection();
+            return;
+        }
+
+        let copy_start = selection_start.max(visible_start);
+        let copy_end = selection_end.min(visible_end);
+        let start_offset = copy_start - visible_start;
+        let end_offset = copy_end - visible_start;
+        let payload = logs[start_offset..=end_offset].join("\n");
+
+        match copy_text_to_clipboard(&payload) {
+            Ok(()) => self.set_banner(format!(
+                "Copied {} log lines.",
+                end_offset - start_offset + 1
+            )),
+            Err(err) => self.set_banner(err),
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &Context) {
         if ctx.wants_keyboard_input() {
             return;
@@ -907,6 +1014,8 @@ impl ProcessManagerApp {
         let mut start_all = false;
         let mut stop_all = false;
         let mut restart_all = false;
+        let mut copy_logs = false;
+        let mut clear_logs = false;
 
         ctx.input(|input| {
             if input.modifiers.ctrl && input.key_pressed(Key::N) {
@@ -921,10 +1030,22 @@ impl ProcessManagerApp {
             if input.modifiers.ctrl && input.key_pressed(Key::R) {
                 restart_all = true;
             }
+            if input.modifiers.ctrl && input.key_pressed(Key::C) {
+                copy_logs = true;
+            }
+            if input.key_pressed(Key::Escape) {
+                clear_logs = true;
+            }
         });
 
         if open_add {
             self.open_add_process();
+        }
+        if copy_logs {
+            self.copy_selected_logs();
+        }
+        if clear_logs {
+            self.clear_log_selection();
         }
         if start_all {
             self.manager.start_all();
@@ -1539,7 +1660,13 @@ impl ProcessManagerApp {
     }
 
     fn draw_process_detail(&mut self, ui: &mut Ui, process: &ProcessConfig) {
-        let logs = &self.runtime_snapshot.selected_logs;
+        let logs = self.runtime_snapshot.selected_logs.clone();
+        let visible_log_start = self
+            .runtime_snapshot
+            .selected_log_count
+            .saturating_sub(logs.len());
+        let selected_log_count =
+            self.visible_selected_log_count(&process.id, visible_log_start, logs.len());
         let auto_start = if process.auto_start { "ON" } else { "OFF" };
         let managed_restart = if process.auto_restart { "ON" } else { "OFF" };
         let global_controls = global_controls_summary(process);
@@ -1559,6 +1686,8 @@ impl ProcessManagerApp {
         let mut action_restart = false;
         let mut action_edit = false;
         let mut action_delete = false;
+        let mut action_copy_logs = false;
+        let mut action_clear_log_selection = false;
 
         // Single compact header row: process actions left, metadata uses the remaining space.
         egui::Frame::default()
@@ -1567,7 +1696,11 @@ impl ProcessManagerApp {
             .inner_margin(egui::Margin::symmetric(CONTENT_GUTTER_X, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let action_width = ui.available_width().min(360.0);
+                    let action_width = ui.available_width().min(if selected_log_count > 0 {
+                        520.0
+                    } else {
+                        360.0
+                    });
                     ui.allocate_ui_with_layout(
                         Vec2::new(action_width, 28.0),
                         Layout::left_to_right(Align::Center),
@@ -1608,6 +1741,36 @@ impl ProcessManagerApp {
                             .clicked()
                             {
                                 action_restart = true;
+                            }
+                            if selected_log_count > 0 {
+                                if chrome_text_button(
+                                    ui,
+                                    "📋 Copy Logs",
+                                    TOOLBAR_TEXT,
+                                    Vec2::new(0.0, 28.0),
+                                    12.0,
+                                    false,
+                                )
+                                .on_hover_text(format!(
+                                    "Copy {selected_log_count} selected log lines"
+                                ))
+                                .clicked()
+                                {
+                                    action_copy_logs = true;
+                                }
+                                if chrome_text_button(
+                                    ui,
+                                    "Clear",
+                                    TOOLBAR_GRAY,
+                                    Vec2::new(0.0, 28.0),
+                                    12.0,
+                                    false,
+                                )
+                                .on_hover_text("Clear log selection")
+                                .clicked()
+                                {
+                                    action_clear_log_selection = true;
+                                }
                             }
                             ui.add_space(2.0);
                             let (sep_rect, _) =
@@ -1693,15 +1856,17 @@ impl ProcessManagerApp {
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
 
-                            for line in logs {
+                            for (offset, line) in logs.iter().enumerate() {
+                                let log_index = visible_log_start + offset;
                                 let style = classify_log_line(line);
-                                ui.label(
-                                    RichText::new(line)
-                                        .color(style.color)
-                                        .monospace()
-                                        .size(12.5),
-                                )
-                                .on_hover_text(style.hover);
+                                let selected = self
+                                    .selected_log_range(&process.id)
+                                    .is_some_and(|(start, end)| (start..=end).contains(&log_index));
+                                let response = draw_log_line(ui, line, style, selected);
+                                if response.clicked() {
+                                    let extend_range = ui.input(|input| input.modifiers.shift);
+                                    self.select_log_line(&process.id, log_index, extend_range);
+                                }
                             }
                         });
 
@@ -1719,6 +1884,12 @@ impl ProcessManagerApp {
         }
         if action_restart {
             self.manager.restart_process(&process.id);
+        }
+        if action_copy_logs {
+            self.copy_selected_logs();
+        }
+        if action_clear_log_selection {
+            self.clear_log_selection();
         }
         if action_stop {
             self.manager.stop_process(&process.id);
@@ -2768,6 +2939,36 @@ fn process_markers(process: &ProcessConfig) -> Option<String> {
     } else {
         Some(format!(" ({})", markers.join(",")))
     }
+}
+
+fn draw_log_line(ui: &mut Ui, line: &str, style: LogLineStyle, selected: bool) -> egui::Response {
+    let fill = if selected {
+        Color32::from_rgb(42, 58, 82)
+    } else {
+        Color32::TRANSPARENT
+    };
+
+    egui::Frame::default()
+        .fill(fill)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(line)
+                        .color(style.color)
+                        .monospace()
+                        .size(12.5),
+                )
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_text(format!(
+                "{}\nClick to select; Shift-click another line to select a range.",
+                style.hover
+            ))
+        })
+        .inner
 }
 
 fn global_controls_summary(process: &ProcessConfig) -> &'static str {
