@@ -17,6 +17,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::runtime::Runtime;
 
 use crate::config::{AppConfig, ProcessConfig, ProcessType, DEFAULT_LOG_ROTATION_COUNT};
+use crate::log_classification::contains_error_indicator;
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
 use crate::rest_api::{build_agent_bootstrap, RestServerController, RestServerSnapshot};
 
@@ -3265,13 +3266,7 @@ fn classify_log_line(line: &str) -> LogLineStyle {
         };
     }
 
-    if lower.contains("error")
-        || lower.contains("critical")
-        || lower.contains("fatal")
-        || lower.contains("panic")
-        || lower.contains("traceback")
-        || lower.contains("exception")
-    {
+    if contains_error_indicator(content) {
         return LogLineStyle {
             color: DANGER,
             hover: "Likely error output",

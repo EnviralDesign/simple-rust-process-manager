@@ -15,6 +15,7 @@ use serde::Serialize;
 use tokio::sync::watch;
 
 use crate::config::{ProcessConfig, ProcessType};
+use crate::log_classification::contains_error_indicator;
 
 const IN_MEMORY_LOG_LIMIT: usize = 1000;
 const PROCESS_LOG_FOLDER_NAME: &str = "Process Manager logs";
@@ -1599,13 +1600,7 @@ fn line_has_error(line: &str) -> bool {
     } else {
         trimmed
     };
-    let lower = content.to_ascii_lowercase();
-    lower.contains("error")
-        || lower.contains("critical")
-        || lower.contains("fatal")
-        || lower.contains("panic")
-        || lower.contains("traceback")
-        || lower.contains("exception")
+    contains_error_indicator(content)
 }
 
 #[cfg(windows)]
