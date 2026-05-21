@@ -17,7 +17,8 @@ It is built for the annoying real-world cases:
 - Start your full local stack from one UI instead of juggling terminals.
 - Watch live output for the selected process without leaving the app.
 - Auto-start only the processes you opt into when the manager itself launches.
-- Restart unstable services automatically with per-process managed restart.
+- Restart unstable services automatically with per-process managed restart and optional active hours.
+- Start dormant services from simple per-process schedules.
 - Stop process trees cleanly on Windows, including messy child-process chains.
 - Mix normal commands and Docker containers in the same stack.
 - Expose an optional localhost-only REST API for tooling and AI agents.
@@ -35,7 +36,7 @@ Highlights visible here:
 - `(M)` marks entries with managed restart enabled
 - `(A)` marks entries that auto-start when the app launches
 - `Start All`, `Stop All`, and `Restart All` control entries that opt into each global action
-- right-click any process in the sidebar to move it up or down
+- drag any process in the sidebar to reorder it, or right-click for move actions
 - the selected process shows live output with warning/error color differentiation
 - the header can expose a loopback API and copy an agent bootstrap payload
 
@@ -50,7 +51,8 @@ This screen covers:
 - command and working directory changes
 - process vs Docker mode
 - auto-start with app launch
-- managed restart
+- managed restart with optional active-hours windows
+- scheduled start triggers for dormant entries
 - Start All / Stop All / Restart All participation
 - disk log capture and retention
 
@@ -84,7 +86,7 @@ This panel controls:
 
 - Start, stop, and restart the whole stack from the header.
 - Start, stop, restart, edit, or delete individual entries from the process pane.
-- Reorder processes from the sidebar with a right-click `Move up` / `Move down` menu.
+- Reorder processes from the sidebar by dragging them, or use the right-click `Move up` / `Move down` menu.
 - Keep one-off/manual entries independent by disabling their Start All, Stop All, and Restart All participation.
 - Keep a mixed stack of regular commands and Docker containers in one place.
 
@@ -93,10 +95,14 @@ This panel controls:
 - Stream output for the selected process in real time.
 - Visually differentiate system events, warnings, errors, and normal output.
 - Keep the log view pinned to the bottom while new lines arrive.
+- Click log rows to select whole lines; Shift-click selects a row range for structured copying.
+- Double-click a log row to freeze it and enable text selection for that row only; click outside to return to row selection.
 
 ### Resilience
 
 - Enable managed restart per entry for processes that should come back automatically.
+- Limit managed restart to weekly active-hour windows, with an option to stop the process when a window ends.
+- Enable scheduled runs for dormant entries with hourly, every-N-hours, daily, or selected-weekday cadence.
 - Enable auto-start per entry when you want the stack to come up automatically after Process Manager launches.
 - Disable global Start All, Stop All, or Restart All participation per entry without affecting manual controls, auto-start, or managed restart.
 - On Windows, stop entire process trees with Job Objects so children are not orphaned.
@@ -144,10 +150,12 @@ See the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/
 4. Optionally enable:
    - auto-start with app launch
    - managed restart
+   - managed restart active hours
+   - scheduled run
    - Start All / Stop All / Restart All participation
    - disk logging
 5. Select a process in the left sidebar to watch its logs.
-6. Right-click a process in the sidebar if you want to move it up or down in the list.
+6. Drag a process in the sidebar, or right-click it, if you want to move it in the list.
 7. Use stack-wide controls in the header when you want to bring everything up or down together.
 
 ## Command Model
@@ -185,6 +193,18 @@ Example:
       "process_type": "Process",
       "auto_start": false,
       "auto_restart": true,
+      "restart_schedule": {
+        "enabled": false,
+        "stop_when_inactive": false,
+        "hours": []
+      },
+      "scheduled_run": {
+        "enabled": false,
+        "mode": "Daily",
+        "hour": 9,
+        "interval_hours": 1,
+        "weekdays": [true, true, true, true, true, false, false]
+      },
       "respond_to_start_all": true,
       "respond_to_stop_all": true,
       "respond_to_restart_all": true,
@@ -199,6 +219,18 @@ Example:
       "process_type": "Docker",
       "auto_start": false,
       "auto_restart": false,
+      "restart_schedule": {
+        "enabled": false,
+        "stop_when_inactive": false,
+        "hours": []
+      },
+      "scheduled_run": {
+        "enabled": false,
+        "mode": "Daily",
+        "hour": 9,
+        "interval_hours": 1,
+        "weekdays": [true, true, true, true, true, false, false]
+      },
       "respond_to_start_all": true,
       "respond_to_stop_all": true,
       "respond_to_restart_all": true,
@@ -213,6 +245,8 @@ Notes:
 
 - `log_directory` is the shared base folder for persisted logs
 - `.` resolves next to the executable
+- `restart_schedule.hours` is a 168-entry Monday 00:00 through Sunday 23:00 hourly grid; missing or short lists are normalized automatically
+- `scheduled_run` only starts entries that are not already running
 - `respond_to_start_all`, `respond_to_stop_all`, and `respond_to_restart_all` default to `true` for older configs
 - older config versions are migrated automatically on startup
 
@@ -252,6 +286,8 @@ Notes:
 | `Ctrl+S` | Start all processes |
 | `Ctrl+X` | Stop all processes |
 | `Ctrl+R` | Restart all processes |
+| `Ctrl+C` | Copy selected log rows when row selection is active |
+| `Escape` | Clear log row selection |
 
 ## Development
 

@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 47_821;
 pub const DEFAULT_LOG_ROTATION_COUNT: usize = 10;
 pub const DEFAULT_PROCESS_ERROR_FLASH_SECONDS: u64 = 5;
+pub const WEEKLY_HOUR_COUNT: usize = 7 * 24;
 
 /// Type of process being managed
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,6 +35,117 @@ impl std::fmt::Display for ProcessType {
     }
 }
 
+/// Optional weekly active-hours gate for managed restart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedRestartSchedule {
+    /// Whether managed restart is limited to the weekly active-hours grid.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether to actively stop the process when an active window ends.
+    #[serde(default)]
+    pub stop_when_inactive: bool,
+    /// 168 hourly buckets, Monday 00:00 through Sunday 23:00.
+    #[serde(default = "default_weekly_hours")]
+    pub hours: Vec<bool>,
+}
+
+impl Default for ManagedRestartSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stop_when_inactive: false,
+            hours: default_weekly_hours(),
+        }
+    }
+}
+
+impl ManagedRestartSchedule {
+    pub fn active_at(&self, day_index: usize, hour: u32) -> bool {
+        if !self.enabled {
+            return true;
+        }
+
+        weekly_hour_enabled(&self.hours, day_index, hour)
+    }
+}
+
+/// Human-readable scheduled-run cadence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ScheduledRunMode {
+    Hourly,
+    EveryNHours,
+    Daily,
+    SelectedWeekdays,
+}
+
+impl Default for ScheduledRunMode {
+    fn default() -> Self {
+        Self::Daily
+    }
+}
+
+impl std::fmt::Display for ScheduledRunMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hourly => write!(f, "Hourly"),
+            Self::EveryNHours => write!(f, "Every N hours"),
+            Self::Daily => write!(f, "Daily"),
+            Self::SelectedWeekdays => write!(f, "Selected weekdays"),
+        }
+    }
+}
+
+/// Optional scheduled start trigger. This only starts dormant entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledRun {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: ScheduledRunMode,
+    /// Local hour used by Daily and SelectedWeekdays modes.
+    #[serde(default = "default_scheduled_run_hour")]
+    pub hour: u8,
+    /// Interval used by EveryNHours mode.
+    #[serde(default = "default_scheduled_run_interval_hours")]
+    pub interval_hours: u8,
+    /// Seven day flags, Monday through Sunday.
+    #[serde(default = "default_weekdays")]
+    pub weekdays: Vec<bool>,
+}
+
+impl Default for ScheduledRun {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: ScheduledRunMode::Daily,
+            hour: default_scheduled_run_hour(),
+            interval_hours: default_scheduled_run_interval_hours(),
+            weekdays: default_weekdays(),
+        }
+    }
+}
+
+impl ScheduledRun {
+    pub fn due_at(&self, day_index: usize, hour: u32, minute: u32) -> bool {
+        if !self.enabled || minute != 0 {
+            return false;
+        }
+
+        match self.mode {
+            ScheduledRunMode::Hourly => true,
+            ScheduledRunMode::EveryNHours => {
+                let interval = self.interval_hours.clamp(1, 24) as u32;
+                hour % interval == 0
+            }
+            ScheduledRunMode::Daily => hour == self.hour.min(23) as u32,
+            ScheduledRunMode::SelectedWeekdays => {
+                hour == self.hour.min(23) as u32
+                    && self.weekdays.get(day_index).copied().unwrap_or(false)
+            }
+        }
+    }
+}
+
 /// Configuration for a single managed process
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProcessConfig {
@@ -55,6 +167,12 @@ pub struct ProcessConfig {
     /// Whether to auto-restart when the process exits unexpectedly
     #[serde(default)]
     pub auto_restart: bool,
+    /// Optional active-hours gate for managed restart.
+    #[serde(default)]
+    pub restart_schedule: ManagedRestartSchedule,
+    /// Optional scheduled start trigger.
+    #[serde(default)]
+    pub scheduled_run: ScheduledRun,
     /// Whether Start All should start this process
     #[serde(default = "default_global_control_enabled")]
     pub respond_to_start_all: bool,
@@ -87,6 +205,8 @@ impl ProcessConfig {
             process_type,
             auto_start: false,
             auto_restart: false,
+            restart_schedule: ManagedRestartSchedule::default(),
+            scheduled_run: ScheduledRun::default(),
             respond_to_start_all: true,
             respond_to_stop_all: true,
             respond_to_restart_all: true,
@@ -102,6 +222,36 @@ fn default_log_rotation_count() -> usize {
 
 fn default_global_control_enabled() -> bool {
     true
+}
+
+pub fn default_weekly_hours() -> Vec<bool> {
+    vec![false; WEEKLY_HOUR_COUNT]
+}
+
+fn default_weekdays() -> Vec<bool> {
+    vec![true, true, true, true, true, false, false]
+}
+
+fn default_scheduled_run_hour() -> u8 {
+    9
+}
+
+fn default_scheduled_run_interval_hours() -> u8 {
+    1
+}
+
+pub fn weekly_hour_index(day_index: usize, hour: u32) -> Option<usize> {
+    if day_index >= 7 || hour >= 24 {
+        return None;
+    }
+
+    Some(day_index * 24 + hour as usize)
+}
+
+pub fn weekly_hour_enabled(hours: &[bool], day_index: usize, hour: u32) -> bool {
+    weekly_hour_index(day_index, hour)
+        .and_then(|index| hours.get(index).copied())
+        .unwrap_or(false)
 }
 
 /// Configuration for the optional localhost REST control surface
@@ -265,6 +415,20 @@ impl AppConfig {
         }
 
         self.processes.swap(index, index + 1);
+        true
+    }
+
+    /// Move a process to a specific slot in the list.
+    pub fn move_process_to_index(&mut self, id: &str, target_index: usize) -> bool {
+        let Some(index) = self.processes.iter().position(|process| process.id == id) else {
+            return false;
+        };
+        if index == target_index || target_index >= self.processes.len() {
+            return false;
+        }
+
+        let process = self.processes.remove(index);
+        self.processes.insert(target_index, process);
         true
     }
 }

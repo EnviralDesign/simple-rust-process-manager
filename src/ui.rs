@@ -16,7 +16,10 @@ use eframe::egui::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::runtime::Runtime;
 
-use crate::config::{AppConfig, ProcessConfig, ProcessType, DEFAULT_LOG_ROTATION_COUNT};
+use crate::config::{
+    weekly_hour_enabled, weekly_hour_index, AppConfig, ManagedRestartSchedule, ProcessConfig,
+    ProcessType, ScheduledRun, ScheduledRunMode, DEFAULT_LOG_ROTATION_COUNT, WEEKLY_HOUR_COUNT,
+};
 use crate::log_classification::contains_error_indicator;
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
 use crate::rest_api::{build_agent_bootstrap, RestServerController, RestServerSnapshot};
@@ -333,6 +336,12 @@ struct ProcessDraft {
     process_type: ProcessType,
     auto_start: bool,
     auto_restart: bool,
+    restart_schedule: ManagedRestartSchedule,
+    scheduled_run: ScheduledRun,
+    scheduled_run_hour: String,
+    scheduled_run_interval_hours: String,
+    restart_schedule_editor_open: bool,
+    scheduled_run_editor_open: bool,
     respond_to_start_all: bool,
     respond_to_stop_all: bool,
     respond_to_restart_all: bool,
@@ -349,6 +358,12 @@ impl Default for ProcessDraft {
             process_type: ProcessType::Process,
             auto_start: false,
             auto_restart: false,
+            restart_schedule: ManagedRestartSchedule::default(),
+            scheduled_run: ScheduledRun::default(),
+            scheduled_run_hour: ScheduledRun::default().hour.to_string(),
+            scheduled_run_interval_hours: ScheduledRun::default().interval_hours.to_string(),
+            restart_schedule_editor_open: false,
+            scheduled_run_editor_open: false,
             respond_to_start_all: true,
             respond_to_stop_all: true,
             respond_to_restart_all: true,
@@ -367,6 +382,12 @@ impl ProcessDraft {
             process_type: process.process_type.clone(),
             auto_start: process.auto_start,
             auto_restart: process.auto_restart,
+            restart_schedule: process.restart_schedule.clone(),
+            scheduled_run: process.scheduled_run.clone(),
+            scheduled_run_hour: process.scheduled_run.hour.to_string(),
+            scheduled_run_interval_hours: process.scheduled_run.interval_hours.to_string(),
+            restart_schedule_editor_open: false,
+            scheduled_run_editor_open: false,
             respond_to_start_all: process.respond_to_start_all,
             respond_to_stop_all: process.respond_to_stop_all,
             respond_to_restart_all: process.respond_to_restart_all,
@@ -444,6 +465,12 @@ impl LogSelection {
     }
 }
 
+#[derive(Clone, Debug)]
+struct FrozenLogLine {
+    process_id: String,
+    index: usize,
+}
+
 pub struct ProcessManagerApp {
     toggles: RuntimeToggles,
     runtime: Runtime,
@@ -451,6 +478,7 @@ pub struct ProcessManagerApp {
     rest_controller: Arc<RestServerController>,
     config: AppConfig,
     selected_process: Option<String>,
+    dragged_process: Option<String>,
     process_dialog: Option<ProcessDialog>,
     delete_process_id: Option<String>,
     rest_settings_open: bool,
@@ -462,6 +490,7 @@ pub struct ProcessManagerApp {
     copy_feedback_until: Option<Instant>,
     stick_logs_to_bottom: bool,
     log_selection: Option<LogSelection>,
+    frozen_log_line: Option<FrozenLogLine>,
     last_error_version: u64,
     last_process_error_versions: HashMap<String, u64>,
     process_row_flashes: HashMap<String, TimedFlash>,
@@ -539,6 +568,7 @@ impl ProcessManagerApp {
             rest_controller,
             config,
             selected_process: selected_process.clone(),
+            dragged_process: None,
             process_dialog: None,
             delete_process_id: None,
             rest_settings_open: false,
@@ -550,6 +580,7 @@ impl ProcessManagerApp {
             copy_feedback_until: None,
             stick_logs_to_bottom: true,
             log_selection: None,
+            frozen_log_line: None,
             last_error_version: 0,
             last_process_error_versions,
             process_row_flashes: HashMap::new(),
@@ -758,6 +789,14 @@ impl ProcessManagerApp {
                         return;
                     }
                 };
+                let scheduled_run = match build_scheduled_run(&form) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.set_banner(err);
+                        return;
+                    }
+                };
+                let restart_schedule = normalize_restart_schedule(form.restart_schedule.clone());
 
                 let mut process = ProcessConfig::new(
                     form.name.trim().to_string(),
@@ -767,6 +806,8 @@ impl ProcessManagerApp {
                 );
                 process.auto_start = form.auto_start;
                 process.auto_restart = form.auto_restart;
+                process.restart_schedule = restart_schedule;
+                process.scheduled_run = scheduled_run;
                 process.respond_to_start_all = form.respond_to_start_all;
                 process.respond_to_stop_all = form.respond_to_stop_all;
                 process.respond_to_restart_all = form.respond_to_restart_all;
@@ -792,6 +833,14 @@ impl ProcessManagerApp {
                         return;
                     }
                 };
+                let scheduled_run = match build_scheduled_run(&form) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.set_banner(err);
+                        return;
+                    }
+                };
+                let restart_schedule = normalize_restart_schedule(form.restart_schedule.clone());
 
                 if matches!(
                     self.manager.get_status(&id),
@@ -811,6 +860,8 @@ impl ProcessManagerApp {
                     process_type: form.process_type,
                     auto_start: form.auto_start,
                     auto_restart: form.auto_restart,
+                    restart_schedule,
+                    scheduled_run,
                     respond_to_start_all: form.respond_to_start_all,
                     respond_to_stop_all: form.respond_to_stop_all,
                     respond_to_restart_all: form.respond_to_restart_all,
@@ -891,6 +942,13 @@ impl ProcessManagerApp {
         }
     }
 
+    fn move_process_to_index(&mut self, process_id: &str, target_index: usize) {
+        if self.config.move_process_to_index(process_id, target_index) {
+            self.persist_config();
+            self.set_banner("Process reordered.");
+        }
+    }
+
     fn selected_process_config(&self) -> Option<ProcessConfig> {
         self.selected_process
             .as_ref()
@@ -908,6 +966,7 @@ impl ProcessManagerApp {
         if selected_changed {
             self.stick_logs_to_bottom = true;
             self.log_selection = None;
+            self.frozen_log_line = None;
         }
 
         let started = Instant::now();
@@ -920,6 +979,8 @@ impl ProcessManagerApp {
     }
 
     fn select_log_line(&mut self, process_id: &str, log_index: usize, extend_range: bool) {
+        self.frozen_log_line = None;
+
         if extend_range {
             if let Some(selection) = self
                 .log_selection
@@ -936,6 +997,30 @@ impl ProcessManagerApp {
             anchor: log_index,
             focus: log_index,
         });
+    }
+
+    fn freeze_log_line(&mut self, process_id: &str, log_index: usize) {
+        self.log_selection = Some(LogSelection {
+            process_id: process_id.to_string(),
+            anchor: log_index,
+            focus: log_index,
+        });
+        self.frozen_log_line = Some(FrozenLogLine {
+            process_id: process_id.to_string(),
+            index: log_index,
+        });
+    }
+
+    fn is_frozen_log_line(&self, process_id: &str, log_index: usize) -> bool {
+        self.frozen_log_line
+            .as_ref()
+            .is_some_and(|frozen| frozen.process_id == process_id && frozen.index == log_index)
+    }
+
+    fn is_log_text_selection_frozen(&self, process_id: &str) -> bool {
+        self.frozen_log_line
+            .as_ref()
+            .is_some_and(|frozen| frozen.process_id == process_id)
     }
 
     fn selected_log_range(&self, process_id: &str) -> Option<(usize, usize)> {
@@ -965,6 +1050,7 @@ impl ProcessManagerApp {
 
     fn clear_log_selection(&mut self) {
         self.log_selection = None;
+        self.frozen_log_line = None;
     }
 
     fn copy_selected_logs(&mut self) {
@@ -1031,7 +1117,7 @@ impl ProcessManagerApp {
             if input.modifiers.ctrl && input.key_pressed(Key::R) {
                 restart_all = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::C) {
+            if input.modifiers.ctrl && input.key_pressed(Key::C) && self.frozen_log_line.is_none() {
                 copy_logs = true;
             }
             if input.key_pressed(Key::Escape) {
@@ -1547,6 +1633,7 @@ impl ProcessManagerApp {
                                 let process_count = self.config.processes.len();
                                 let mut move_up_id: Option<String> = None;
                                 let mut move_down_id: Option<String> = None;
+                                let mut reorder_to: Option<(String, usize)> = None;
 
                                 for (index, process) in
                                     self.config.processes.clone().into_iter().enumerate()
@@ -1569,6 +1656,19 @@ impl ProcessManagerApp {
                                         flash_intensity,
                                     );
                                     let row_clicked = row_response.clicked();
+                                    if row_response.drag_started() {
+                                        self.dragged_process = Some(process.id.clone());
+                                        self.selected_process = Some(process.id.clone());
+                                        self.refresh_runtime_snapshot(true);
+                                    }
+                                    if let Some(dragged_id) = self.dragged_process.clone() {
+                                        if dragged_id != process.id
+                                            && row_response.hovered()
+                                            && ctx.input(|input| input.pointer.any_released())
+                                        {
+                                            reorder_to = Some((dragged_id, index));
+                                        }
+                                    }
                                     row_response.context_menu(|ui| {
                                         let can_move_up = index > 0;
                                         let can_move_down = index + 1 < process_count;
@@ -1595,7 +1695,12 @@ impl ProcessManagerApp {
                                     ui.add_space(2.0);
                                 }
 
-                                if let Some(process_id) = move_up_id {
+                                if let Some((process_id, target_index)) = reorder_to {
+                                    self.move_process_to_index(&process_id, target_index);
+                                    self.dragged_process = None;
+                                } else if ctx.input(|input| input.pointer.any_released()) {
+                                    self.dragged_process = None;
+                                } else if let Some(process_id) = move_up_id {
                                     self.move_process_up(&process_id);
                                 } else if let Some(process_id) = move_down_id {
                                     self.move_process_down(&process_id);
@@ -1860,11 +1965,19 @@ impl ProcessManagerApp {
                             for (offset, line) in logs.iter().enumerate() {
                                 let log_index = visible_log_start + offset;
                                 let style = classify_log_line(line);
-                                let selected = self
-                                    .selected_log_range(&process.id)
-                                    .is_some_and(|(start, end)| (start..=end).contains(&log_index));
-                                let response = draw_log_line(ui, line, style, selected);
-                                if response.clicked() {
+                                let frozen = self.is_frozen_log_line(&process.id, log_index);
+                                let text_selection_frozen =
+                                    self.is_log_text_selection_frozen(&process.id);
+                                let selected = frozen
+                                    || self.selected_log_range(&process.id).is_some_and(
+                                        |(start, end)| (start..=end).contains(&log_index),
+                                    );
+                                let response = draw_log_line(ui, line, style, selected, frozen);
+                                if frozen && response.clicked_elsewhere() {
+                                    self.clear_log_selection();
+                                } else if response.double_clicked() {
+                                    self.freeze_log_line(&process.id, log_index);
+                                } else if !text_selection_frozen && response.clicked() {
                                     let extend_range = ui.input(|input| input.modifiers.shift);
                                     self.select_log_line(&process.id, log_index, extend_range);
                                 }
@@ -2028,28 +2141,26 @@ impl ProcessManagerApp {
                                         );
 
                                         ui.add_space(14.0);
-                                        modal_checkbox_row(
-                                            ui,
-                                            &mut form.respond_to_start_all,
-                                            "Respond to Start All",
-                                            Some("Allow the header Start All button and stack start API action to start this entry."),
-                                        );
+                                        if form.auto_restart {
+                                            draw_restart_schedule_summary(ui, form);
+                                            ui.add_space(14.0);
+                                        } else {
+                                            form.restart_schedule.enabled = false;
+                                        }
 
-                                        ui.add_space(14.0);
                                         modal_checkbox_row(
                                             ui,
-                                            &mut form.respond_to_stop_all,
-                                            "Respond to Stop All",
-                                            Some("Allow the header Stop All button and stack stop API action to stop this entry."),
+                                            &mut form.scheduled_run.enabled,
+                                            "Scheduled run",
+                                            Some("Start this entry from a time-based schedule when it is not already running."),
                                         );
+                                        ui.add_space(14.0);
+                                        if form.scheduled_run.enabled {
+                                            draw_scheduled_run_summary(ui, form);
+                                            ui.add_space(14.0);
+                                        }
 
-                                        ui.add_space(14.0);
-                                        modal_checkbox_row(
-                                            ui,
-                                            &mut form.respond_to_restart_all,
-                                            "Respond to Restart All",
-                                            Some("Allow the header Restart All button and stack restart API action to restart this entry."),
-                                        );
+                                        draw_stack_control_group(ui, form);
 
                                         ui.add_space(14.0);
                                         modal_checkbox_row(
@@ -2097,6 +2208,8 @@ impl ProcessManagerApp {
                         }
                     });
                 });
+
+            draw_process_schedule_editors(ctx, dialog.form_mut());
 
             if !open {
                 close_dialog = true;
@@ -2834,8 +2947,10 @@ fn draw_process_row(
     selected: bool,
     flash_intensity: f32,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 32.0),
+        egui::Sense::click_and_drag(),
+    );
 
     let is_hovered = response.hovered();
 
@@ -2917,7 +3032,7 @@ fn draw_process_row(
             skipped_global_controls.join(", ")
         ));
     }
-    hover_lines.push("Right-click to reorder".to_string());
+    hover_lines.push("Drag to reorder; right-click for move actions".to_string());
 
     response.on_hover_text(hover_lines.join("\n"))
 }
@@ -2942,34 +3057,57 @@ fn process_markers(process: &ProcessConfig) -> Option<String> {
     }
 }
 
-fn draw_log_line(ui: &mut Ui, line: &str, style: LogLineStyle, selected: bool) -> egui::Response {
+fn draw_log_line(
+    ui: &mut Ui,
+    line: &str,
+    style: LogLineStyle,
+    selected: bool,
+    text_selectable: bool,
+) -> egui::Response {
     let fill = if selected {
         Color32::from_rgb(42, 58, 82)
     } else {
         Color32::TRANSPARENT
     };
 
-    egui::Frame::default()
+    let shown = egui::Frame::default()
         .fill(fill)
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.add(
-                egui::Label::new(
-                    RichText::new(line)
-                        .color(style.color)
-                        .monospace()
-                        .size(12.5),
-                )
-                .sense(egui::Sense::click()),
+            let mut label = egui::Label::new(
+                RichText::new(line)
+                    .color(style.color)
+                    .monospace()
+                    .size(12.5),
             )
+            .selectable(text_selectable);
+
+            if !text_selectable {
+                label = label.sense(egui::Sense::click());
+            }
+
+            ui.add(label)
             .on_hover_text(format!(
-                "{}\nClick to select; Shift-click another line to select a range.",
-                style.hover
+                "{}\n{}",
+                style.hover,
+                if text_selectable {
+                    "Drag to select text; click outside this row to return to row selection."
+                } else {
+                    "Click to select; Shift-click another line to select a range; double-click to select text."
+                }
             ))
-        })
-        .inner
+        });
+
+    if text_selectable {
+        shown.response.union(shown.inner)
+    } else {
+        shown
+            .response
+            .interact(egui::Sense::click())
+            .union(shown.inner)
+    }
 }
 
 fn global_controls_summary(process: &ProcessConfig) -> &'static str {
@@ -3108,6 +3246,274 @@ fn modal_divider(ui: &mut Ui) {
         rect.center().y,
         Stroke::new(1.0, SHELL_SUBTLE_STROKE),
     );
+}
+
+fn draw_restart_schedule_summary(ui: &mut Ui, form: &mut ProcessDraft) {
+    egui::Frame::default()
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(MODAL_FORM_WIDTH - 24.0);
+            ui.checkbox(&mut form.restart_schedule.enabled, "Enable active schedule");
+            ui.add_space(5.0);
+            ui.checkbox(
+                &mut form.restart_schedule.stop_when_inactive,
+                "Stop when window ends",
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(restart_schedule_summary(&form.restart_schedule))
+                        .color(TEXT_MUTED)
+                        .size(11.5),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if subtle_action_button(ui, "Edit hours...", Some(ACCENT_SOFT)).clicked() {
+                        form.restart_schedule_editor_open = true;
+                    }
+                });
+            });
+        });
+}
+
+fn draw_scheduled_run_summary(ui: &mut Ui, form: &mut ProcessDraft) {
+    egui::Frame::default()
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(MODAL_FORM_WIDTH - 24.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(scheduled_run_summary(form))
+                        .color(TEXT_MUTED)
+                        .size(11.5),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if subtle_action_button(ui, "Edit schedule...", Some(ACCENT_SOFT)).clicked() {
+                        form.scheduled_run_editor_open = true;
+                    }
+                });
+            });
+        });
+}
+
+fn draw_stack_control_group(ui: &mut Ui, form: &mut ProcessDraft) {
+    egui::Frame::default()
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(MODAL_FORM_WIDTH - 24.0);
+            ui.label(field_label("Respond to stack controls"));
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut form.respond_to_start_all, "Start All");
+                ui.checkbox(&mut form.respond_to_stop_all, "Stop All");
+                ui.checkbox(&mut form.respond_to_restart_all, "Restart All");
+            });
+        });
+}
+
+fn draw_process_schedule_editors(ctx: &Context, form: &mut ProcessDraft) {
+    if form.restart_schedule_editor_open {
+        let mut open = true;
+        Window::new("Managed Restart Active Hours")
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([690.0, 430.0])
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(PANEL_BG)
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
+            .open(&mut open)
+            .show(ctx, |ui| {
+                normalize_weekly_hours(&mut form.restart_schedule.hours);
+                ui.label(
+                    RichText::new(
+                        "Toggle the hours when managed restart should actively start and repeat this process.",
+                    )
+                    .color(TEXT_MUTED)
+                    .size(12.0),
+                );
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    if shell_button(ui, "Clear").clicked() {
+                        set_weekly_hours(&mut form.restart_schedule.hours, false);
+                    }
+                    if shell_button(ui, "All").clicked() {
+                        set_weekly_hours(&mut form.restart_schedule.hours, true);
+                    }
+                    if shell_button(ui, "Weekdays").clicked() {
+                        set_weekday_hours(&mut form.restart_schedule.hours, 0..5, 0..24);
+                    }
+                    if shell_button(ui, "Weekends").clicked() {
+                        set_weekday_hours(&mut form.restart_schedule.hours, 5..7, 0..24);
+                    }
+                    if shell_button(ui, "Business Hours").clicked() {
+                        set_weekday_hours(&mut form.restart_schedule.hours, 0..5, 9..17);
+                    }
+                    if shell_button(ui, "Nights").clicked() {
+                        set_night_hours(&mut form.restart_schedule.hours);
+                    }
+                });
+
+                ui.add_space(12.0);
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(292.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("restart_schedule_hours_grid")
+                            .spacing([4.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("");
+                                for hour in 0..24 {
+                                    ui.label(
+                                        RichText::new(format!("{hour:02}"))
+                                            .color(TEXT_MUTED)
+                                            .size(10.5),
+                                    );
+                                }
+                                ui.end_row();
+
+                                for day in 0..7 {
+                                    ui.label(
+                                        RichText::new(day_label(day))
+                                            .color(TEXT_SOFT)
+                                            .size(11.0),
+                                    );
+                                    for hour in 0..24 {
+                                        let enabled = weekly_hour_enabled(
+                                            &form.restart_schedule.hours,
+                                            day,
+                                            hour,
+                                        );
+                                        let label = if enabled { "ON" } else { "" };
+                                        let response = ui.add(
+                                            Button::new(RichText::new(label).size(9.0))
+                                                .fill(if enabled {
+                                                    TAB_SELECTED_BG
+                                                } else {
+                                                    FIELD_BG
+                                                })
+                                                .stroke(Stroke::new(
+                                                    1.0,
+                                                    if enabled {
+                                                        TAB_SELECTED_STROKE
+                                                    } else {
+                                                        FIELD_BORDER
+                                                    },
+                                                ))
+                                                .min_size(Vec2::new(22.0, 22.0)),
+                                        );
+                                        if response.clicked() {
+                                            if let Some(index) = weekly_hour_index(day, hour) {
+                                                form.restart_schedule.hours[index] = !enabled;
+                                            }
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        form.restart_schedule_editor_open = open;
+    }
+
+    if form.scheduled_run_editor_open {
+        let mut open = true;
+        Window::new("Scheduled Run")
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([430.0, 340.0])
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(PANEL_BG)
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(430.0);
+                ui.label(
+                    RichText::new("Choose when this process should receive a start request.")
+                        .color(TEXT_MUTED)
+                        .size(12.0),
+                );
+                ui.add_space(14.0);
+                ui.label(field_label("Cadence"));
+                ui.horizontal_wrapped(|ui| {
+                    modal_tab_button(
+                        ui,
+                        &mut form.scheduled_run.mode,
+                        ScheduledRunMode::Hourly,
+                        "Hourly",
+                    );
+                    modal_tab_button(
+                        ui,
+                        &mut form.scheduled_run.mode,
+                        ScheduledRunMode::EveryNHours,
+                        "Every N hours",
+                    );
+                    modal_tab_button(
+                        ui,
+                        &mut form.scheduled_run.mode,
+                        ScheduledRunMode::Daily,
+                        "Daily",
+                    );
+                    modal_tab_button(
+                        ui,
+                        &mut form.scheduled_run.mode,
+                        ScheduledRunMode::SelectedWeekdays,
+                        "Weekdays",
+                    );
+                });
+
+                ui.add_space(14.0);
+                match form.scheduled_run.mode {
+                    ScheduledRunMode::Hourly => {
+                        ui.label(
+                            RichText::new("Runs at the top of every hour.")
+                                .color(TEXT_MUTED)
+                                .size(11.5),
+                        );
+                    }
+                    ScheduledRunMode::EveryNHours => {
+                        ui.label(field_label("Every N Hours"));
+                        modal_text_edit(
+                            ui,
+                            &mut form.scheduled_run_interval_hours,
+                            "1",
+                            MODAL_FORM_WIDTH,
+                        );
+                    }
+                    ScheduledRunMode::Daily => {
+                        ui.label(field_label("Local Hour"));
+                        modal_text_edit(ui, &mut form.scheduled_run_hour, "9", MODAL_FORM_WIDTH);
+                    }
+                    ScheduledRunMode::SelectedWeekdays => {
+                        ui.label(field_label("Local Hour"));
+                        modal_text_edit(ui, &mut form.scheduled_run_hour, "9", MODAL_FORM_WIDTH);
+                        ui.add_space(12.0);
+                        ui.label(field_label("Days"));
+                        normalize_weekdays(&mut form.scheduled_run.weekdays);
+                        ui.horizontal_wrapped(|ui| {
+                            for day in 0..7 {
+                                ui.checkbox(&mut form.scheduled_run.weekdays[day], day_label(day));
+                            }
+                        });
+                    }
+                }
+            });
+        form.scheduled_run_editor_open = open;
+    }
 }
 
 fn modal_tab_button<T>(ui: &mut Ui, current: &mut T, value: T, label: &str) -> egui::Response
@@ -3316,6 +3722,144 @@ fn parse_log_rotation_count(value: &str) -> Result<usize, String> {
     match value.trim().parse::<usize>() {
         Ok(count) if count > 0 => Ok(count),
         _ => Err("Logs to keep must be a whole number greater than 0.".to_string()),
+    }
+}
+
+fn build_scheduled_run(form: &ProcessDraft) -> Result<ScheduledRun, String> {
+    let mut scheduled_run = form.scheduled_run.clone();
+    scheduled_run.hour = parse_hour(&form.scheduled_run_hour)?;
+    scheduled_run.interval_hours = parse_interval_hours(&form.scheduled_run_interval_hours)?;
+    normalize_weekdays(&mut scheduled_run.weekdays);
+    Ok(scheduled_run)
+}
+
+fn normalize_restart_schedule(mut schedule: ManagedRestartSchedule) -> ManagedRestartSchedule {
+    normalize_weekly_hours(&mut schedule.hours);
+    schedule
+}
+
+fn parse_hour(value: &str) -> Result<u8, String> {
+    match value.trim().parse::<u8>() {
+        Ok(hour) if hour <= 23 => Ok(hour),
+        _ => Err("Scheduled run hour must be a whole number from 0 to 23.".to_string()),
+    }
+}
+
+fn parse_interval_hours(value: &str) -> Result<u8, String> {
+    match value.trim().parse::<u8>() {
+        Ok(hours) if (1..=24).contains(&hours) => Ok(hours),
+        _ => Err("Scheduled run interval must be a whole number from 1 to 24.".to_string()),
+    }
+}
+
+fn normalize_weekly_hours(hours: &mut Vec<bool>) {
+    if hours.len() < WEEKLY_HOUR_COUNT {
+        hours.resize(WEEKLY_HOUR_COUNT, false);
+    } else if hours.len() > WEEKLY_HOUR_COUNT {
+        hours.truncate(WEEKLY_HOUR_COUNT);
+    }
+}
+
+fn normalize_weekdays(days: &mut Vec<bool>) {
+    if days.len() < 7 {
+        days.resize(7, false);
+    } else if days.len() > 7 {
+        days.truncate(7);
+    }
+}
+
+fn set_weekly_hours(hours: &mut Vec<bool>, value: bool) {
+    normalize_weekly_hours(hours);
+    for enabled in hours.iter_mut() {
+        *enabled = value;
+    }
+}
+
+fn set_weekday_hours(
+    hours: &mut Vec<bool>,
+    days: impl Iterator<Item = usize>,
+    hour_range: impl Iterator<Item = usize> + Clone,
+) {
+    set_weekly_hours(hours, false);
+    for day in days {
+        for hour in hour_range.clone() {
+            if let Some(index) = weekly_hour_index(day, hour as u32) {
+                hours[index] = true;
+            }
+        }
+    }
+}
+
+fn set_night_hours(hours: &mut Vec<bool>) {
+    set_weekly_hours(hours, false);
+    for day in 0..7 {
+        for hour in 0..24 {
+            if (0..6).contains(&hour) || hour >= 20 {
+                if let Some(index) = weekly_hour_index(day, hour as u32) {
+                    hours[index] = true;
+                }
+            }
+        }
+    }
+}
+
+fn restart_schedule_summary(schedule: &ManagedRestartSchedule) -> String {
+    if !schedule.enabled {
+        return "No active-hours gate. Managed restart can run anytime.".to_string();
+    }
+
+    let active_hours = schedule.hours.iter().filter(|enabled| **enabled).count();
+    let stop_note = if schedule.stop_when_inactive {
+        " Stops when inactive."
+    } else {
+        " Lets active runs finish."
+    };
+    format!("{active_hours} active hours per week.{stop_note}")
+}
+
+fn scheduled_run_summary(form: &ProcessDraft) -> String {
+    match form.scheduled_run.mode {
+        ScheduledRunMode::Hourly => "Starts at the top of every hour.".to_string(),
+        ScheduledRunMode::EveryNHours => {
+            format!(
+                "Starts every {} hour(s).",
+                form.scheduled_run_interval_hours.trim()
+            )
+        }
+        ScheduledRunMode::Daily => {
+            format!("Starts daily at {:0>2}:00.", form.scheduled_run_hour.trim())
+        }
+        ScheduledRunMode::SelectedWeekdays => {
+            let selected = form
+                .scheduled_run
+                .weekdays
+                .iter()
+                .enumerate()
+                .filter_map(|(index, enabled)| enabled.then_some(day_label(index)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let selected = if selected.is_empty() {
+                "no days".to_string()
+            } else {
+                selected
+            };
+            format!(
+                "Starts on {selected} at {:0>2}:00.",
+                form.scheduled_run_hour.trim()
+            )
+        }
+    }
+}
+
+fn day_label(index: usize) -> &'static str {
+    match index {
+        0 => "Mon",
+        1 => "Tue",
+        2 => "Wed",
+        3 => "Thu",
+        4 => "Fri",
+        5 => "Sat",
+        _ => "Sun",
     }
 }
 
