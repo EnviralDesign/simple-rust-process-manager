@@ -18,7 +18,8 @@ use tokio::runtime::Runtime;
 
 use crate::config::{
     weekly_hour_enabled, weekly_hour_index, AppConfig, ManagedRestartSchedule, ProcessConfig,
-    ProcessType, ScheduledRun, ScheduledRunMode, DEFAULT_LOG_ROTATION_COUNT, WEEKLY_HOUR_COUNT,
+    ProcessType, ScheduledRun, ScheduledRunMode, DEFAULT_LOG_ROTATION_COUNT,
+    DEFAULT_STARTUP_DELAY_SECONDS, WEEKLY_HOUR_COUNT,
 };
 use crate::log_classification::contains_error_indicator;
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
@@ -52,6 +53,9 @@ const TOOLBAR_RED: Color32 = Color32::from_rgb(208, 116, 116);
 const TOOLBAR_GRAY: Color32 = Color32::from_rgb(162, 162, 162);
 const ACCENT_SOFT: Color32 = Color32::from_rgb(86, 102, 126);
 const SIDEBAR_WIDTH: f32 = 240.0;
+const SIDEBAR_MIN_WIDTH: f32 = 180.0;
+const SIDEBAR_MAX_WIDTH: f32 = 460.0;
+const PROCESS_LABEL_HOVER_DELAY_SECONDS: f64 = 2.0;
 const UI_LOG_LIMIT: usize = 1000;
 const WINDOW_CORNER_RADIUS: u8 = 8;
 const CONTENT_GUTTER_X: i8 = 16;
@@ -335,6 +339,7 @@ struct ProcessDraft {
     working_directory: String,
     process_type: ProcessType,
     auto_start: bool,
+    startup_delay_seconds: String,
     auto_restart: bool,
     restart_schedule: ManagedRestartSchedule,
     scheduled_run: ScheduledRun,
@@ -357,6 +362,7 @@ impl Default for ProcessDraft {
             working_directory: String::new(),
             process_type: ProcessType::Process,
             auto_start: false,
+            startup_delay_seconds: DEFAULT_STARTUP_DELAY_SECONDS.to_string(),
             auto_restart: false,
             restart_schedule: ManagedRestartSchedule::default(),
             scheduled_run: ScheduledRun::default(),
@@ -381,6 +387,7 @@ impl ProcessDraft {
             working_directory: process.working_directory.clone(),
             process_type: process.process_type.clone(),
             auto_start: process.auto_start,
+            startup_delay_seconds: process.startup_delay_seconds.to_string(),
             auto_restart: process.auto_restart,
             restart_schedule: process.restart_schedule.clone(),
             scheduled_run: process.scheduled_run.clone(),
@@ -449,6 +456,12 @@ struct TimedFlash {
 }
 
 #[derive(Clone, Debug)]
+struct ProcessLabelHover {
+    process_id: String,
+    started_at: Instant,
+}
+
+#[derive(Clone, Debug)]
 struct LogSelection {
     process_id: String,
     anchor: usize,
@@ -494,6 +507,7 @@ pub struct ProcessManagerApp {
     last_error_version: u64,
     last_process_error_versions: HashMap<String, u64>,
     process_row_flashes: HashMap<String, TimedFlash>,
+    process_label_hover: Option<ProcessLabelHover>,
     current_title: String,
     #[cfg(windows)]
     root_hwnd: Option<windows_sys::Win32::Foundation::HWND>,
@@ -584,6 +598,7 @@ impl ProcessManagerApp {
             last_error_version: 0,
             last_process_error_versions,
             process_row_flashes: HashMap::new(),
+            process_label_hover: None,
             current_title,
             #[cfg(windows)]
             root_hwnd: extract_root_hwnd(cc),
@@ -682,6 +697,59 @@ impl ProcessManagerApp {
         let pulse =
             0.6 + ((((ctx.input(|input| input.time) as f32) * 8.5).sin() * 0.5) + 0.5) * 0.4;
         pulse * tail_fade.clamp(0.0, 1.0)
+    }
+
+    fn update_process_label_hover(
+        &mut self,
+        ui: &mut Ui,
+        response: &egui::Response,
+        process: &ProcessConfig,
+    ) {
+        if response.hovered() {
+            let now = Instant::now();
+            let reset_hover = self
+                .process_label_hover
+                .as_ref()
+                .map_or(true, |hover| hover.process_id != process.id);
+
+            if reset_hover {
+                self.process_label_hover = Some(ProcessLabelHover {
+                    process_id: process.id.clone(),
+                    started_at: now,
+                });
+            }
+
+            let delay = Duration::from_secs_f64(PROCESS_LABEL_HOVER_DELAY_SECONDS);
+            let elapsed = self
+                .process_label_hover
+                .as_ref()
+                .filter(|hover| hover.process_id == process.id)
+                .map(|hover| now.saturating_duration_since(hover.started_at))
+                .unwrap_or_default();
+
+            if elapsed >= delay {
+                let label = process_tab_label(process);
+                egui::Tooltip::always_open(
+                    ui.ctx().clone(),
+                    ui.layer_id(),
+                    response.id.with("full_process_label"),
+                    egui::PopupAnchor::Pointer,
+                )
+                .gap(12.0)
+                .show(|ui| {
+                    ui.set_max_width(360.0);
+                    ui.label(RichText::new(label).color(TEXT_MAIN).size(13.0));
+                });
+            } else {
+                ui.ctx().request_repaint_after(delay - elapsed);
+            }
+        } else if self
+            .process_label_hover
+            .as_ref()
+            .is_some_and(|hover| hover.process_id == process.id)
+        {
+            self.process_label_hover = None;
+        }
     }
 
     fn sync_process_error_flashes(&mut self) {
@@ -796,6 +864,14 @@ impl ProcessManagerApp {
                         return;
                     }
                 };
+                let startup_delay_seconds =
+                    match parse_startup_delay_seconds(&form.startup_delay_seconds) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            self.set_banner(err);
+                            return;
+                        }
+                    };
                 let restart_schedule = normalize_restart_schedule(form.restart_schedule.clone());
 
                 let mut process = ProcessConfig::new(
@@ -805,6 +881,7 @@ impl ProcessManagerApp {
                     form.process_type,
                 );
                 process.auto_start = form.auto_start;
+                process.startup_delay_seconds = startup_delay_seconds;
                 process.auto_restart = form.auto_restart;
                 process.restart_schedule = restart_schedule;
                 process.scheduled_run = scheduled_run;
@@ -840,6 +917,14 @@ impl ProcessManagerApp {
                         return;
                     }
                 };
+                let startup_delay_seconds =
+                    match parse_startup_delay_seconds(&form.startup_delay_seconds) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            self.set_banner(err);
+                            return;
+                        }
+                    };
                 let restart_schedule = normalize_restart_schedule(form.restart_schedule.clone());
 
                 if matches!(
@@ -859,6 +944,7 @@ impl ProcessManagerApp {
                     working_directory: form.working_directory.trim().to_string(),
                     process_type: form.process_type,
                     auto_start: form.auto_start,
+                    startup_delay_seconds,
                     auto_restart: form.auto_restart,
                     restart_schedule,
                     scheduled_run,
@@ -1562,9 +1648,10 @@ impl ProcessManagerApp {
 
     fn draw_sidebar(&mut self, ctx: &Context) {
         SidePanel::left("sidebar")
-            .resizable(false)
-            .min_width(SIDEBAR_WIDTH)
-            .max_width(SIDEBAR_WIDTH)
+            .resizable(true)
+            .default_width(SIDEBAR_WIDTH)
+            .min_width(SIDEBAR_MIN_WIDTH)
+            .max_width(SIDEBAR_MAX_WIDTH)
             .frame(
                 egui::Frame::default()
                     .fill(self.shell_bg)
@@ -1572,6 +1659,7 @@ impl ProcessManagerApp {
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
+                ui.set_width(ui.available_width());
                 TopBottomPanel::bottom("global_settings_panel")
                     .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(0, 4)))
                     .show_inside(ui, |ui| {
@@ -1655,6 +1743,7 @@ impl ProcessManagerApp {
                                         is_selected,
                                         flash_intensity,
                                     );
+                                    self.update_process_label_hover(ui, &row_response, &process);
                                     let row_clicked = row_response.clicked();
                                     if row_response.drag_started() {
                                         self.dragged_process = Some(process.id.clone());
@@ -1777,13 +1866,14 @@ impl ProcessManagerApp {
         let managed_restart = if process.auto_restart { "ON" } else { "OFF" };
         let global_controls = global_controls_summary(process);
         let metadata = format!(
-            "{} | {} | auto-start {} | restart {} | global {}",
+            "{} | {} | auto-start {} | delay {}s | restart {} | global {}",
             match &process.process_type {
                 ProcessType::Process => "Process",
                 ProcessType::Docker => "Docker",
             },
             &process.command,
             auto_start,
+            process.startup_delay_seconds,
             managed_restart,
             global_controls
         );
@@ -2130,6 +2220,21 @@ impl ProcessManagerApp {
                                             &mut form.auto_start,
                                             "Auto-start with app launch",
                                             Some("Start this entry automatically whenever Process Manager starts."),
+                                        );
+
+                                        ui.add_space(14.0);
+                                        ui.label(field_label("Startup Delay (seconds)"));
+                                        modal_text_edit(
+                                            ui,
+                                            &mut form.startup_delay_seconds,
+                                            "0",
+                                            MODAL_FORM_WIDTH,
+                                        );
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new("Wait before launching this entry after any start request. Use 0 to start immediately.")
+                                                .color(TEXT_MUTED)
+                                                .size(11.5),
                                         );
 
                                         ui.add_space(14.0);
@@ -3018,23 +3123,7 @@ fn draw_process_row(
         );
     }
 
-    let mut hover_lines = vec![process.command.clone()];
-    if process.auto_start {
-        hover_lines.push("Auto-start on app launch enabled".to_string());
-    }
-    if process.auto_restart {
-        hover_lines.push("Managed restart enabled".to_string());
-    }
-    let skipped_global_controls = skipped_global_controls(process);
-    if !skipped_global_controls.is_empty() {
-        hover_lines.push(format!(
-            "Ignores global: {}",
-            skipped_global_controls.join(", ")
-        ));
-    }
-    hover_lines.push("Drag to reorder; right-click for move actions".to_string());
-
-    response.on_hover_text(hover_lines.join("\n"))
+    response
 }
 
 fn field_label(text: &str) -> RichText {
@@ -3054,6 +3143,13 @@ fn process_markers(process: &ProcessConfig) -> Option<String> {
         None
     } else {
         Some(format!(" ({})", markers.join(",")))
+    }
+}
+
+fn process_tab_label(process: &ProcessConfig) -> String {
+    match process_markers(process) {
+        Some(markers) => format!("{}{}", process.name, markers),
+        None => process.name.clone(),
     }
 }
 
@@ -3120,20 +3216,6 @@ fn global_controls_summary(process: &ProcessConfig) -> &'static str {
         (false, false, false) => "ignored",
         _ => "custom",
     }
-}
-
-fn skipped_global_controls(process: &ProcessConfig) -> Vec<&'static str> {
-    let mut skipped = Vec::new();
-    if !process.respond_to_start_all {
-        skipped.push("Start All");
-    }
-    if !process.respond_to_stop_all {
-        skipped.push("Stop All");
-    }
-    if !process.respond_to_restart_all {
-        skipped.push("Restart All");
-    }
-    skipped
 }
 
 fn draw_sidebar_footer_button(ui: &mut Ui, label: &str) -> egui::Response {
@@ -3722,6 +3804,13 @@ fn parse_log_rotation_count(value: &str) -> Result<usize, String> {
     match value.trim().parse::<usize>() {
         Ok(count) if count > 0 => Ok(count),
         _ => Err("Logs to keep must be a whole number greater than 0.".to_string()),
+    }
+}
+
+fn parse_startup_delay_seconds(value: &str) -> Result<u64, String> {
+    match value.trim().parse::<u64>() {
+        Ok(seconds) => Ok(seconds),
+        Err(_) => Err("Startup delay must be a whole number of seconds.".to_string()),
     }
 }
 

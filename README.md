@@ -192,6 +192,7 @@ Example:
       "working_directory": "C:/projects/my-app/frontend",
       "process_type": "Process",
       "auto_start": false,
+      "startup_delay_seconds": 0,
       "auto_restart": true,
       "restart_schedule": {
         "enabled": false,
@@ -218,6 +219,7 @@ Example:
       "working_directory": "",
       "process_type": "Docker",
       "auto_start": false,
+      "startup_delay_seconds": 0,
       "auto_restart": false,
       "restart_schedule": {
         "enabled": false,
@@ -247,6 +249,7 @@ Notes:
 - `.` resolves next to the executable
 - `restart_schedule.hours` is a 168-entry Monday 00:00 through Sunday 23:00 hourly grid; missing or short lists are normalized automatically
 - `scheduled_run` only starts entries that are not already running
+- `startup_delay_seconds` waits before honoring any start request for that entry and defaults to `0`
 - `respond_to_start_all`, `respond_to_stop_all`, and `respond_to_restart_all` default to `true` for older configs
 - older config versions are migrated automatically on startup
 

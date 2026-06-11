@@ -601,12 +601,13 @@ pub fn build_agent_bootstrap(
     } else {
         for process in processes {
             lines.push(format!(
-                "- {} | id={} | type={} | status={} | auto_start={} | auto_restart={} | stack_start={} | stack_stop={} | stack_restart={}",
+                "- {} | id={} | type={} | status={} | auto_start={} | startup_delay_seconds={} | auto_restart={} | stack_start={} | stack_stop={} | stack_restart={}",
                 process.name,
                 process.id,
                 process.process_type,
                 process.status,
                 process.auto_start,
+                process.startup_delay_seconds,
                 process.auto_restart,
                 process.respond_to_start_all,
                 process.respond_to_stop_all,

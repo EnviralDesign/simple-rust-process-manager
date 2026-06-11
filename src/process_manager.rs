@@ -10,6 +10,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
+use std::time::Duration;
 
 use chrono::{Datelike, Timelike};
 use serde::Serialize;
@@ -53,6 +54,7 @@ pub struct ProcessState {
     pub disk_log: Option<SharedLogFile>,
     pub child: Option<Child>,
     pub suppress_restart_once: bool,
+    start_generation: u64,
     #[cfg(windows)]
     pub job: Option<JobHandle>,
 }
@@ -66,6 +68,7 @@ impl ProcessState {
             disk_log: None,
             child: None,
             suppress_restart_once: false,
+            start_generation: 0,
             #[cfg(windows)]
             job: None,
         }
@@ -81,6 +84,7 @@ pub struct ProcessRuntimeSnapshot {
     pub status: String,
     pub status_detail: Option<String>,
     pub auto_start: bool,
+    pub startup_delay_seconds: u64,
     pub auto_restart: bool,
     pub respond_to_start_all: bool,
     pub respond_to_stop_all: bool,
@@ -312,7 +316,7 @@ impl ProcessManager {
         let process_error_versions = self.process_error_versions.clone();
 
         // Get config and update status
-        let config = {
+        let (config, start_generation) = {
             let mut processes = processes_arc.lock().unwrap();
             println!("[DEBUG] Got lock, looking for process id: {}", id);
             if let Some(state) = processes.get_mut(id) {
@@ -320,16 +324,18 @@ impl ProcessManager {
                     "[DEBUG] Found process: {}, status: {:?}",
                     state.config.name, state.status
                 );
-                if state.status == ProcessStatus::Running {
-                    println!("[DEBUG] Already running, returning");
+                if !process_is_dormant(state) || state.status == ProcessStatus::Starting {
+                    println!("[DEBUG] Already running or starting, returning");
                     return; // Already running
                 }
                 state.suppress_restart_once = false;
                 state.status = ProcessStatus::Starting;
                 state.logs.clear();
                 state.disk_log = None;
+                state.start_generation = state.start_generation.wrapping_add(1);
+                let start_generation = state.start_generation;
                 bump_event(&event_tx, &event_version);
-                state.config.clone()
+                (state.config.clone(), start_generation)
             } else {
                 println!("[DEBUG] Process not found in manager!");
                 return;
@@ -345,6 +351,7 @@ impl ProcessManager {
         launch_process(
             &id_owned,
             &config,
+            start_generation,
             processes_arc,
             log_directory,
             event_tx,
@@ -357,6 +364,7 @@ impl ProcessManager {
     fn start_system_process(
         id: &str,
         config: &ProcessConfig,
+        start_generation: u64,
         processes_arc: Arc<Mutex<HashMap<String, ProcessState>>>,
         log_directory: Arc<Mutex<String>>,
         event_tx: watch::Sender<u64>,
@@ -370,6 +378,17 @@ impl ProcessManager {
         let config_clone = config.clone();
 
         thread::spawn(move || {
+            if !wait_for_startup_delay(
+                &id_owned,
+                &config_clone,
+                start_generation,
+                &processes_arc,
+                &event_tx,
+                &event_version,
+            ) {
+                return;
+            }
+
             println!("[DEBUG] Thread spawned for command: {}", command);
             println!("[DEBUG] Working dir: '{}'", working_dir);
 
@@ -728,6 +747,7 @@ impl ProcessManager {
     fn start_docker_container(
         id: &str,
         config: &ProcessConfig,
+        start_generation: u64,
         processes_arc: Arc<Mutex<HashMap<String, ProcessState>>>,
         log_directory: Arc<Mutex<String>>,
         event_tx: watch::Sender<u64>,
@@ -740,6 +760,17 @@ impl ProcessManager {
         let config_clone = config.clone();
 
         thread::spawn(move || {
+            if !wait_for_startup_delay(
+                &id_owned,
+                &config_clone,
+                start_generation,
+                &processes_arc,
+                &event_tx,
+                &event_version,
+            ) {
+                return;
+            }
+
             let disk_log = if config_clone.log_to_disk {
                 let base_directory = log_directory.lock().unwrap().clone();
                 match create_disk_log_session(&base_directory, &config_clone) {
@@ -1393,6 +1424,7 @@ fn process_snapshot_from_state(state: &ProcessState) -> ProcessRuntimeSnapshot {
         status,
         status_detail,
         auto_start: state.config.auto_start,
+        startup_delay_seconds: state.config.startup_delay_seconds,
         auto_restart: state.config.auto_restart,
         respond_to_start_all: state.config.respond_to_start_all,
         respond_to_stop_all: state.config.respond_to_stop_all,
@@ -1435,6 +1467,7 @@ fn bump_error(
 fn launch_process(
     id: &str,
     config: &ProcessConfig,
+    start_generation: u64,
     processes: Arc<Mutex<HashMap<String, ProcessState>>>,
     log_directory: Arc<Mutex<String>>,
     event_tx: watch::Sender<u64>,
@@ -1446,6 +1479,7 @@ fn launch_process(
         ProcessType::Process => ProcessManager::start_system_process(
             id,
             config,
+            start_generation,
             processes,
             log_directory,
             event_tx,
@@ -1456,6 +1490,7 @@ fn launch_process(
         ProcessType::Docker => ProcessManager::start_docker_container(
             id,
             config,
+            start_generation,
             processes,
             log_directory,
             event_tx,
@@ -1464,6 +1499,65 @@ fn launch_process(
             process_error_versions,
         ),
     }
+}
+
+fn wait_for_startup_delay(
+    id: &str,
+    config: &ProcessConfig,
+    start_generation: u64,
+    processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
+    event_tx: &watch::Sender<u64>,
+    event_version: &Arc<AtomicU64>,
+) -> bool {
+    if !start_request_is_current(id, start_generation, processes) {
+        return false;
+    }
+
+    let delay = config.startup_delay_seconds;
+    if delay == 0 {
+        return true;
+    }
+
+    {
+        let mut processes = processes.lock().unwrap();
+        let Some(state) = processes.get_mut(id) else {
+            return false;
+        };
+        if !start_request_is_current_state(state, start_generation) {
+            return false;
+        }
+        log_process_state_event(
+            state,
+            format!("[Startup delay: waiting {} second(s)]", delay),
+        );
+    }
+    bump_event(event_tx, event_version);
+
+    for _ in 0..delay {
+        thread::sleep(Duration::from_secs(1));
+        if !start_request_is_current(id, start_generation, processes) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn start_request_is_current(
+    id: &str,
+    start_generation: u64,
+    processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
+) -> bool {
+    let processes = processes.lock().unwrap();
+    processes
+        .get(id)
+        .is_some_and(|state| start_request_is_current_state(state, start_generation))
+}
+
+fn start_request_is_current_state(state: &ProcessState, start_generation: u64) -> bool {
+    state.start_generation == start_generation
+        && state.child.is_none()
+        && matches!(state.status, ProcessStatus::Starting)
 }
 
 fn stop_process_inner(
@@ -1483,6 +1577,7 @@ fn stop_process_inner(
         let mut processes = processes_arc.lock().unwrap();
         if let Some(state) = processes.get_mut(id) {
             state.suppress_restart_once = true;
+            state.start_generation = state.start_generation.wrapping_add(1);
             match state.config.process_type {
                 ProcessType::Process => {
                     if let Some(child) = state.child.take() {
@@ -1595,8 +1690,14 @@ fn stop_process_inner(
 }
 
 enum SchedulerAction {
-    Start { id: String, config: ProcessConfig },
-    Stop { id: String },
+    Start {
+        id: String,
+        config: ProcessConfig,
+        start_generation: u64,
+    },
+    Stop {
+        id: String,
+    },
 }
 
 fn run_scheduler_tick(
@@ -1634,6 +1735,7 @@ fn run_scheduler_tick(
                     state.status = ProcessStatus::Starting;
                     state.logs.clear();
                     state.disk_log = None;
+                    state.start_generation = state.start_generation.wrapping_add(1);
                     log_process_state_event(
                         state,
                         "[Managed restart schedule became active. Starting...]".to_string(),
@@ -1641,6 +1743,7 @@ fn run_scheduler_tick(
                     actions.push(SchedulerAction::Start {
                         id: id.clone(),
                         config: state.config.clone(),
+                        start_generation: state.start_generation,
                     });
                     updated = true;
                 } else if !active
@@ -1670,6 +1773,7 @@ fn run_scheduler_tick(
                     state.status = ProcessStatus::Starting;
                     state.logs.clear();
                     state.disk_log = None;
+                    state.start_generation = state.start_generation.wrapping_add(1);
                     log_process_state_event(
                         state,
                         "[Scheduled run triggered. Starting...]".to_string(),
@@ -1677,6 +1781,7 @@ fn run_scheduler_tick(
                     actions.push(SchedulerAction::Start {
                         id: id.clone(),
                         config: state.config.clone(),
+                        start_generation: state.start_generation,
                     });
                     updated = true;
                 }
@@ -1690,9 +1795,14 @@ fn run_scheduler_tick(
 
     for action in actions {
         match action {
-            SchedulerAction::Start { id, config } => launch_process(
+            SchedulerAction::Start {
+                id,
+                config,
+                start_generation,
+            } => launch_process(
                 &id,
                 &config,
+                start_generation,
                 processes.clone(),
                 log_directory.clone(),
                 event_tx.clone(),
@@ -1740,7 +1850,7 @@ fn schedule_managed_restart(
     thread::spawn(move || {
         thread::sleep(std::time::Duration::from_secs(1));
 
-        let config = {
+        let (config, start_generation) = {
             let mut processes = processes.lock().unwrap();
             let Some(state) = processes.get_mut(&id) else {
                 return;
@@ -1756,7 +1866,7 @@ fn schedule_managed_restart(
                 || state.child.is_some()
                 || matches!(
                     state.status,
-                    ProcessStatus::Running | ProcessStatus::Stopping
+                    ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Stopping
                 )
             {
                 return;
@@ -1764,7 +1874,10 @@ fn schedule_managed_restart(
 
             state.suppress_restart_once = false;
             state.status = ProcessStatus::Starting;
-            state.config.clone()
+            state.logs.clear();
+            state.disk_log = None;
+            state.start_generation = state.start_generation.wrapping_add(1);
+            (state.config.clone(), state.start_generation)
         };
 
         bump_event(&event_tx, &event_version);
@@ -1772,6 +1885,7 @@ fn schedule_managed_restart(
         launch_process(
             &id,
             &config,
+            start_generation,
             processes.clone(),
             log_directory.clone(),
             event_tx.clone(),

@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 47_821;
 pub const DEFAULT_LOG_ROTATION_COUNT: usize = 10;
 pub const DEFAULT_PROCESS_ERROR_FLASH_SECONDS: u64 = 5;
+pub const DEFAULT_STARTUP_DELAY_SECONDS: u64 = 0;
 pub const WEEKLY_HOUR_COUNT: usize = 7 * 24;
 
 /// Type of process being managed
@@ -164,6 +165,9 @@ pub struct ProcessConfig {
     /// Whether to auto-start when manager launches
     #[serde(default)]
     pub auto_start: bool,
+    /// Seconds to wait before honoring any start request for this process.
+    #[serde(default = "default_startup_delay_seconds")]
+    pub startup_delay_seconds: u64,
     /// Whether to auto-restart when the process exits unexpectedly
     #[serde(default)]
     pub auto_restart: bool,
@@ -204,6 +208,7 @@ impl ProcessConfig {
             working_directory,
             process_type,
             auto_start: false,
+            startup_delay_seconds: default_startup_delay_seconds(),
             auto_restart: false,
             restart_schedule: ManagedRestartSchedule::default(),
             scheduled_run: ScheduledRun::default(),
@@ -214,6 +219,16 @@ impl ProcessConfig {
             log_rotation_count: default_log_rotation_count(),
         }
     }
+
+    pub fn normalize(&mut self) {
+        normalize_weekly_hours(&mut self.restart_schedule.hours);
+        normalize_weekdays(&mut self.scheduled_run.weekdays);
+        self.scheduled_run.hour = self.scheduled_run.hour.min(23);
+        self.scheduled_run.interval_hours = self.scheduled_run.interval_hours.clamp(1, 24);
+        if self.log_rotation_count == 0 {
+            self.log_rotation_count = default_log_rotation_count();
+        }
+    }
 }
 
 fn default_log_rotation_count() -> usize {
@@ -222,6 +237,10 @@ fn default_log_rotation_count() -> usize {
 
 fn default_global_control_enabled() -> bool {
     true
+}
+
+fn default_startup_delay_seconds() -> u64 {
+    DEFAULT_STARTUP_DELAY_SECONDS
 }
 
 pub fn default_weekly_hours() -> Vec<bool> {
@@ -238,6 +257,22 @@ fn default_scheduled_run_hour() -> u8 {
 
 fn default_scheduled_run_interval_hours() -> u8 {
     1
+}
+
+fn normalize_weekly_hours(hours: &mut Vec<bool>) {
+    if hours.len() < WEEKLY_HOUR_COUNT {
+        hours.resize(WEEKLY_HOUR_COUNT, false);
+    } else if hours.len() > WEEKLY_HOUR_COUNT {
+        hours.truncate(WEEKLY_HOUR_COUNT);
+    }
+}
+
+fn normalize_weekdays(days: &mut Vec<bool>) {
+    if days.len() < 7 {
+        days.resize(7, false);
+    } else if days.len() > 7 {
+        days.truncate(7);
+    }
 }
 
 pub fn weekly_hour_index(day_index: usize, hour: u32) -> Option<usize> {
@@ -338,7 +373,8 @@ impl AppConfig {
         if path.exists() {
             match fs::read_to_string(&path) {
                 Ok(content) => match serde_json::from_str::<Self>(&content) {
-                    Ok(config) => {
+                    Ok(mut config) => {
+                        config.normalize();
                         let _ = config.save();
                         return config;
                     }
@@ -353,15 +389,31 @@ impl AppConfig {
         }
 
         // Return default config
-        let config = Self::default();
+        let mut config = Self::default();
+        config.normalize();
         let _ = config.save(); // Try to save default
         config
+    }
+
+    /// Normalize loaded or edited config so older process files round-trip into the current schema.
+    pub fn normalize(&mut self) {
+        if self.log_directory.trim().is_empty() {
+            self.log_directory = default_log_directory();
+        }
+        if self.remote_control.port == 0 {
+            self.remote_control.port = default_remote_control_port();
+        }
+        for process in &mut self.processes {
+            process.normalize();
+        }
     }
 
     /// Save config to file
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
-        let content = serde_json::to_string_pretty(self)
+        let mut normalized = self.clone();
+        normalized.normalize();
+        let content = serde_json::to_string_pretty(&normalized)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
         fs::write(&path, content).map_err(|e| format!("Failed to write config: {}", e))?;
@@ -370,7 +422,8 @@ impl AppConfig {
     }
 
     /// Add a new process configuration
-    pub fn add_process(&mut self, config: ProcessConfig) {
+    pub fn add_process(&mut self, mut config: ProcessConfig) {
+        config.normalize();
         self.processes.push(config);
     }
 
@@ -386,7 +439,8 @@ impl AppConfig {
 
     /// Update a process configuration
     #[allow(dead_code)]
-    pub fn update_process(&mut self, id: &str, updated: ProcessConfig) {
+    pub fn update_process(&mut self, id: &str, mut updated: ProcessConfig) {
+        updated.normalize();
         if let Some(process) = self.processes.iter_mut().find(|p| p.id == id) {
             *process = updated;
         }
@@ -430,5 +484,54 @@ impl AppConfig {
         let process = self.processes.remove(index);
         self.processes.insert(target_index, process);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_startup_delay_defaults_to_zero_and_serializes() {
+        let raw = r#"{
+            "stack_name": "Test Stack",
+            "processes": [
+                {
+                    "id": "process-1",
+                    "name": "API",
+                    "command": "cargo run"
+                }
+            ]
+        }"#;
+
+        let mut config: AppConfig = serde_json::from_str(raw).expect("config should parse");
+        config.normalize();
+
+        assert_eq!(config.processes[0].startup_delay_seconds, 0);
+        let value = serde_json::to_value(&config).expect("config should serialize");
+        assert_eq!(value["processes"][0]["startup_delay_seconds"], 0);
+    }
+
+    #[test]
+    fn normalize_repairs_process_schema_edges() {
+        let mut process = ProcessConfig::new(
+            "Worker".to_string(),
+            "worker.exe".to_string(),
+            String::new(),
+            ProcessType::Process,
+        );
+        process.restart_schedule.hours = vec![true];
+        process.scheduled_run.weekdays = vec![true, false];
+        process.scheduled_run.hour = 99;
+        process.scheduled_run.interval_hours = 0;
+        process.log_rotation_count = 0;
+
+        process.normalize();
+
+        assert_eq!(process.restart_schedule.hours.len(), WEEKLY_HOUR_COUNT);
+        assert_eq!(process.scheduled_run.weekdays.len(), 7);
+        assert_eq!(process.scheduled_run.hour, 23);
+        assert_eq!(process.scheduled_run.interval_hours, 1);
+        assert_eq!(process.log_rotation_count, DEFAULT_LOG_ROTATION_COUNT);
     }
 }
