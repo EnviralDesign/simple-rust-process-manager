@@ -36,7 +36,7 @@ Highlights visible here:
 - `(M)` marks entries with managed restart enabled
 - `(A)` marks entries that auto-start when the app launches
 - `Start All`, `Stop All`, and `Restart All` control entries that opt into each global action
-- drag any process in the sidebar to reorder it, or right-click for move actions
+- drag any process in the sidebar to reorder it; a live insertion line previews where the row will land when dropped, or use right-click move actions
 - the selected process shows live output with warning/error color differentiation
 - the header can expose a loopback API and copy an agent bootstrap payload
 
@@ -86,7 +86,7 @@ This panel controls:
 
 - Start, stop, and restart the whole stack from the header.
 - Start, stop, restart, edit, or delete individual entries from the process pane.
-- Reorder processes from the sidebar by dragging them, or use the right-click `Move up` / `Move down` menu.
+- Reorder processes from the sidebar by dragging them; while dragging, an insertion line previews the drop position, or use the right-click `Move up` / `Move down` menu.
 - Keep one-off/manual entries independent by disabling their Start All, Stop All, and Restart All participation.
 - Keep a mixed stack of regular commands and Docker containers in one place.
 
@@ -270,6 +270,7 @@ Control endpoints:
 - `POST /stack/start`
 - `POST /stack/stop`
 - `POST /stack/restart`
+- `POST /stack/reload` (reloads `processes.json` from disk and reinitializes the managed set)
 - `POST /processes/{id}/start`
 - `POST /processes/{id}/stop`
 - `POST /processes/{id}/restart`
@@ -279,6 +280,7 @@ Notes:
 - the API binds only to `127.0.0.1`
 - use process `id`, not display name, for per-process actions
 - `GET /processes/{id}/logs?limit=N` defaults to `200` and caps at `1000`
+- `POST /stack/reload` always stops all managed processes before reload, regardless of their individual `respond_to_*` stack-control flags.
 - control calls are fire-and-poll; poll `GET /processes` or `GET /health` for updated state
 
 ## Keyboard Shortcuts

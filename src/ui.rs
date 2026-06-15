@@ -494,6 +494,7 @@ pub struct ProcessManagerApp {
     dragged_process: Option<String>,
     process_dialog: Option<ProcessDialog>,
     delete_process_id: Option<String>,
+    reload_processes_confirm_open: bool,
     rest_settings_open: bool,
     global_settings_tab: usize,
     rest_settings_form: RestSettingsForm,
@@ -585,6 +586,7 @@ impl ProcessManagerApp {
             dragged_process: None,
             process_dialog: None,
             delete_process_id: None,
+            reload_processes_confirm_open: false,
             rest_settings_open: false,
             global_settings_tab: 0,
             rest_settings_form,
@@ -820,6 +822,38 @@ impl ProcessManagerApp {
         self.rest_settings_open = true;
     }
 
+    fn request_processes_reload(&mut self) {
+        self.reload_processes_confirm_open = true;
+    }
+
+    fn cancel_reload_processes_confirmation(&mut self) {
+        self.reload_processes_confirm_open = false;
+    }
+
+    fn reload_processes_from_disk(&mut self) {
+        let config = match AppConfig::load_from_disk() {
+            Ok(mut config) => {
+                config.normalize();
+                config
+            }
+            Err(err) => {
+                self.set_banner(format!("Failed to reload processes.json: {}", err));
+                return;
+            }
+        };
+
+        self.set_banner("Stopping all processes and reloading from processes.json...");
+        self.manager.set_log_directory(config.log_directory.clone());
+        self.manager.reload_from_config(&config.processes);
+        self.config = config;
+        self.apply_rest_config();
+        self.last_process_error_versions = self.manager.error_versions();
+        self.process_row_flashes.clear();
+        self.ensure_valid_selection();
+        self.refresh_runtime_snapshot(true);
+        self.set_banner("Processes reloaded from processes.json.");
+    }
+
     fn toggle_api_enabled(&mut self) {
         self.config.remote_control.enabled = !self.config.remote_control.enabled;
         self.persist_config();
@@ -1033,6 +1067,38 @@ impl ProcessManagerApp {
             self.persist_config();
             self.set_banner("Process reordered.");
         }
+    }
+
+    fn draw_drag_insert_marker(
+        &self,
+        ui: &mut Ui,
+        row_bounds: &[egui::Rect],
+        insert_index: usize,
+    ) {
+        if row_bounds.is_empty() {
+            return;
+        }
+
+        let marker_row = if insert_index >= row_bounds.len() {
+            row_bounds.len() - 1
+        } else {
+            insert_index
+        };
+
+        let marker_rect = row_bounds[marker_row];
+        let y = if insert_index >= row_bounds.len() {
+            marker_rect.max.y
+        } else {
+            marker_rect.min.y
+        };
+
+        let left = marker_rect.left() + 8.0;
+        let right = marker_rect.right() - 8.0;
+
+        ui.painter().line_segment(
+            [egui::pos2(left, y), egui::pos2(right, y)],
+            Stroke::new(2.0, TAB_SELECTED_STROKE),
+        );
     }
 
     fn selected_process_config(&self) -> Option<ProcessConfig> {
@@ -1591,6 +1657,22 @@ impl ProcessManagerApp {
                             self.manager.start_all();
                         }
 
+                        if chrome_text_button(
+                            ui,
+                            "⟳ Reload",
+                            TOOLBAR_YELLOW,
+                            Vec2::new(0.0, 28.0),
+                            12.0,
+                            false,
+                        )
+                        .on_hover_text(
+                            "Reload processes.json from disk and reinitialize managed entries.",
+                        )
+                        .clicked()
+                        {
+                            self.request_processes_reload();
+                        }
+
                         ui.add_space(4.0);
                         let (sep_rect, _) =
                             ui.allocate_exact_size(Vec2::new(1.0, 18.0), egui::Sense::hover());
@@ -1717,11 +1799,13 @@ impl ProcessManagerApp {
 
                         ScrollArea::vertical()
                             .auto_shrink([false, false])
-                            .show(ui, |ui| {
+                    .show(ui, |ui| {
                                 let process_count = self.config.processes.len();
                                 let mut move_up_id: Option<String> = None;
                                 let mut move_down_id: Option<String> = None;
                                 let mut reorder_to: Option<(String, usize)> = None;
+                                let mut drag_insert_index: Option<usize> = None;
+                                let mut row_bounds: Vec<egui::Rect> = Vec::with_capacity(process_count);
 
                                 for (index, process) in
                                     self.config.processes.clone().into_iter().enumerate()
@@ -1755,9 +1839,13 @@ impl ProcessManagerApp {
                                             && row_response.hovered()
                                             && ctx.input(|input| input.pointer.any_released())
                                         {
-                                            reorder_to = Some((dragged_id, index));
+                                            reorder_to = Some((dragged_id.clone(), index));
+                                        }
+                                        if dragged_id != process.id && row_response.hovered() {
+                                            drag_insert_index = Some(index);
                                         }
                                     }
+                                    row_bounds.push(row_response.rect);
                                     row_response.context_menu(|ui| {
                                         let can_move_up = index > 0;
                                         let can_move_down = index + 1 < process_count;
@@ -1784,6 +1872,24 @@ impl ProcessManagerApp {
                                     ui.add_space(2.0);
                                 }
 
+                                if self.dragged_process.is_some() && ctx.input(|input| input.pointer.primary_down()) {
+                                    let can_place_at_end = !row_bounds.is_empty()
+                                        && process_count > 0
+                                        && row_bounds.last().is_some_and(|last_rect| {
+                                            ctx.input(|input| {
+                                                input
+                                                    .pointer
+                                                    .interact_pos()
+                                                    .is_some_and(|pos| pos.y >= last_rect.max.y)
+                                            })
+                                        });
+                                    if can_place_at_end {
+                                        drag_insert_index = Some(process_count);
+                                    }
+                                    if let Some(insert_index) = drag_insert_index {
+                                        self.draw_drag_insert_marker(ui, &row_bounds, insert_index);
+                                    }
+                                }
                                 if let Some((process_id, target_index)) = reorder_to {
                                     self.move_process_to_index(&process_id, target_index);
                                     self.dragged_process = None;
@@ -2574,6 +2680,72 @@ impl ProcessManagerApp {
         }
     }
 
+    fn draw_reload_dialog(&mut self, ctx: &Context) {
+        if !self.reload_processes_confirm_open {
+            return;
+        }
+
+        let mut open = true;
+        let mut confirm = false;
+
+        Window::new("Reload processes.json")
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(PANEL_BG)
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.set_min_height(220.0);
+                ui.label(
+                    RichText::new("Reload processes.json")
+                        .color(TEXT_MAIN)
+                        .size(16.0)
+                        .strong(),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "This will stop all managed processes first, including those not opted into Stop All."
+                            .to_string(),
+                    )
+                    .color(TEXT_SOFT)
+                    .size(13.0),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "After that, the local processes.json file will be reloaded and the process list will be rebuilt."
+                            .to_string(),
+                    )
+                    .color(TEXT_SOFT)
+                    .size(13.0),
+                );
+
+                modal_footer(ui, |ui| {
+                    if subtle_action_button(ui, "Reload", Some(TOOLBAR_YELLOW)).clicked() {
+                        confirm = true;
+                    }
+                    if shell_button(ui, "Cancel").clicked() {
+                        self.cancel_reload_processes_confirmation();
+                    }
+                });
+            });
+
+        if !open {
+            self.cancel_reload_processes_confirmation();
+        }
+
+        if confirm {
+            self.reload_processes_from_disk();
+            self.reload_processes_confirm_open = false;
+        }
+    }
+
     fn maybe_request_attention(&mut self, ctx: &Context) {
         let current = self.manager.error_version();
         if current <= self.last_error_version {
@@ -2721,6 +2893,7 @@ impl eframe::App for ProcessManagerApp {
         self.draw_process_dialog(ctx);
         self.draw_rest_settings_dialog(ctx);
         self.draw_delete_dialog(ctx);
+        self.draw_reload_dialog(ctx);
         self.draw_diagnostics_overlay(ctx);
         self.record_update_timing(update_started.elapsed());
     }

@@ -10,7 +10,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{Datelike, Timelike};
 use serde::Serialize;
@@ -260,6 +260,29 @@ impl ProcessManager {
         process_error_versions.retain(|id, _| processes.contains_key(id));
         schedule_state.retain(|id, _| processes.contains_key(id));
         self.update_docker_polling_flag_locked(&processes);
+    }
+
+    /// Reload all process states from a new config set.
+    pub fn reload_from_config(&self, configs: &[ProcessConfig]) {
+        self.stop_all_forced();
+
+        let mut processes = self.processes.lock().unwrap();
+        let mut process_error_versions = self.process_error_versions.lock().unwrap();
+        let mut schedule_state = self.schedule_state.lock().unwrap();
+
+        processes.clear();
+        process_error_versions.clear();
+        schedule_state.clear();
+
+        for config in configs {
+            let process_id = config.id.clone();
+            processes.insert(process_id.clone(), ProcessState::new(config.clone()));
+            process_error_versions.entry(process_id.clone()).or_insert(0);
+            schedule_state.entry(process_id).or_default();
+        }
+
+        self.update_docker_polling_flag_locked(&processes);
+        self.notify();
     }
 
     /// Add a new process
@@ -1034,6 +1057,43 @@ impl ProcessManager {
         }
     }
 
+    /// Stop all managed processes regardless of stack-control flags.
+    pub fn stop_all_forced(&self) {
+        let ids: Vec<String> = {
+            let processes = self.processes.lock().unwrap();
+            processes.keys().cloned().collect()
+        };
+        for id in &ids {
+            self.stop_process(id);
+        }
+
+        let _ = self.wait_for_processes_to_stop(&ids, Duration::from_secs(5));
+    }
+
+    fn wait_for_processes_to_stop(&self, ids: &[String], timeout: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            let all_stopped = {
+                let processes = self.processes.lock().unwrap();
+                ids.iter().all(|id| {
+                    processes
+                        .get(id)
+                        .map_or(true, |state| matches!(state.status, ProcessStatus::Stopped | ProcessStatus::Error(_)))
+                })
+            };
+
+            if all_stopped {
+                return true;
+            }
+
+            if start.elapsed() >= timeout {
+                return false;
+            }
+
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Restart all processes
     pub fn restart_all(&self) {
         let ids: Vec<String> = {
@@ -1050,28 +1110,8 @@ impl ProcessManager {
         }
 
         // Wait for all processes to stop (max 5 seconds)
-        let start = std::time::Instant::now();
-        loop {
-            let all_stopped = {
-                let processes = self.processes.lock().unwrap();
-                ids.iter().all(|id| {
-                    processes.get(id).map_or(true, |p| {
-                        p.status == ProcessStatus::Stopped
-                            || matches!(p.status, ProcessStatus::Error(_))
-                    })
-                })
-            };
-
-            if all_stopped {
-                break;
-            }
-
-            if start.elapsed().as_secs() > 5 {
-                println!("[WARN] Restart all timeout waiting for stops");
-                break;
-            }
-
-            thread::sleep(std::time::Duration::from_millis(100));
+        if !self.wait_for_processes_to_stop(&ids, Duration::from_secs(5)) {
+            println!("[WARN] Restart all timeout waiting for stops");
         }
 
         for id in ids {

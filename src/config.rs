@@ -366,25 +366,15 @@ impl AppConfig {
         exe_dir.join("processes.json")
     }
 
-    /// Load config from file, creating default if not found
+    /// Load config from file, creating default if not found or if parsing fails.
     pub fn load() -> Self {
-        let path = Self::config_path();
-
-        if path.exists() {
-            match fs::read_to_string(&path) {
-                Ok(content) => match serde_json::from_str::<Self>(&content) {
-                    Ok(mut config) => {
-                        config.normalize();
-                        let _ = config.save();
-                        return config;
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to parse config: {}", e);
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Failed to read config: {}", e);
-                }
+        match Self::load_from_disk() {
+            Ok(config) => {
+                let _ = config.save();
+                return config;
+            }
+            Err(err) => {
+                eprintln!("Failed to load config from disk: {}", err);
             }
         }
 
@@ -393,6 +383,22 @@ impl AppConfig {
         config.normalize();
         let _ = config.save(); // Try to save default
         config
+    }
+
+    /// Load config from disk without mutating state or creating fallback values.
+    pub fn load_from_disk() -> Result<Self, String> {
+        let path = Self::config_path();
+
+        if !path.exists() {
+            return Err("processes.json was not found.".to_string());
+        }
+
+        let content = fs::read_to_string(&path)
+            .map_err(|err| format!("Failed to read config: {}", err))?;
+        let mut config = serde_json::from_str::<Self>(&content)
+            .map_err(|err| format!("Failed to parse config: {}", err))?;
+        config.normalize();
+        Ok(config)
     }
 
     /// Normalize loaded or edited config so older process files round-trip into the current schema.
