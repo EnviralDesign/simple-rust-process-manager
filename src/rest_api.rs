@@ -172,6 +172,7 @@ impl RestServerController {
             .route("/processes/{id}/start", post(start_process))
             .route("/processes/{id}/stop", post(stop_process))
             .route("/processes/{id}/restart", post(restart_process))
+            .route("/processes/{id}/reload", post(reload_process))
             .route("/stack/start", post(start_stack))
             .route("/stack/stop", post(stop_stack))
             .route("/stack/restart", post(restart_stack))
@@ -451,6 +452,67 @@ async fn restart_process(
     )
 }
 
+async fn reload_process(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let mut config = match AppConfig::load_from_disk() {
+        Ok(config) => config,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    ok: false,
+                    message: format!("Failed to reload process configuration: {}", err),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    config.normalize();
+
+    let updated_process = match config.processes.into_iter().find(|process| process.id == id) {
+        Some(process) => process,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    ok: false,
+                    message: format!("Process id '{}' not found in processes.json", id),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if !state
+        .manager
+        .reload_process_from_config(updated_process.clone())
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                message: format!("Unknown process id '{}'", id),
+            }),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(AckResponse {
+            ok: true,
+            scope: "process",
+            action: "reload",
+            target_id: Some(id),
+            message: format!("Reloaded process '{}' from processes.json.", updated_process.name),
+        }),
+    )
+        .into_response()
+}
+
 async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
     Json(TopologyResponse {
         base_url: format!("http://{}:{}", REST_HOST, state.port),
@@ -522,6 +584,11 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
                 path: "/processes/{id}/restart",
                 description: "Restarts a single managed process or container.",
             },
+            EndpointDoc {
+                method: "POST",
+                path: "/processes/{id}/reload",
+                description: "Reloads one managed process from processes.json.",
+            },
         ],
         usage_notes: vec![
             "Control endpoints are fire-and-poll. After a POST, poll GET /processes.",
@@ -529,6 +596,7 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
             "Fetch recent output with GET /processes/{id}/logs?limit=N when an agent needs tail logs.",
             "This server binds only to 127.0.0.1 and is reachable only from the same machine.",
             "POST /stack/reload stops all managed processes first, regardless of status or stack-control settings.",
+            "POST /processes/{id}/reload only refreshes config for one process.",
         ],
     })
 }
@@ -619,11 +687,13 @@ pub fn build_agent_bootstrap(
         "3. Call GET /processes/{id}/logs?limit=200 to fetch the latest log tail for a component."
             .to_string(),
         "4. Use POST /stack/reload to reread processes.json from disk. This stops all managed processes first, regardless of status or stack-control settings.".to_string(),
-        "5. Use POST /stack/start, /stack/stop, or /stack/restart for entries that opt into each stack control."
+        "5. Use POST /processes/{id}/reload to reread one process from processes.json."
             .to_string(),
-        "6. Use POST /processes/{id}/start, /stop, or /restart for a single component."
+        "6. Use POST /stack/start, /stack/stop, or /stack/restart for entries that opt into each stack control."
             .to_string(),
-        "7. After any POST, poll GET /processes until the desired state is visible."
+        "7. Use POST /processes/{id}/start, /stop, or /restart for a single component."
+            .to_string(),
+        "8. After any POST, poll GET /processes until the desired state is visible."
             .to_string(),
         String::new(),
         "Endpoint Topology".to_string(),
@@ -639,6 +709,7 @@ pub fn build_agent_bootstrap(
         "- POST /processes/{id}/start".to_string(),
         "- POST /processes/{id}/stop".to_string(),
         "- POST /processes/{id}/restart".to_string(),
+        "- POST /processes/{id}/reload".to_string(),
         String::new(),
         "Known Processes".to_string(),
     ];
@@ -680,6 +751,10 @@ pub fn build_agent_bootstrap(
     } else {
         lines.push(
             "Note: target individual components by stable id rather than by display name."
+                .to_string(),
+        );
+        lines.push(
+            "Note: POST /processes/{id}/reload updates only that process from processes.json."
                 .to_string(),
         );
         lines.push(

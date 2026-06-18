@@ -271,6 +271,7 @@ Control endpoints:
 - `POST /stack/stop`
 - `POST /stack/restart`
 - `POST /stack/reload` (reloads `processes.json` from disk and reinitializes the managed set)
+- `POST /processes/{id}/reload` (reloads one managed process from `processes.json` without stopping others)
 - `POST /processes/{id}/start`
 - `POST /processes/{id}/stop`
 - `POST /processes/{id}/restart`

@@ -807,10 +807,10 @@ impl ProcessManagerApp {
     }
 
     fn open_edit_process(&mut self, process_id: &str) {
-        if let Some(process) = self.config.get_process(process_id) {
+        if let Some(process) = self.process_config(process_id) {
             self.process_dialog = Some(ProcessDialog::Edit {
                 id: process.id.clone(),
-                form: ProcessDraft::from_process(process),
+                form: ProcessDraft::from_process(&process),
             });
         }
     }
@@ -824,6 +824,50 @@ impl ProcessManagerApp {
 
     fn request_processes_reload(&mut self) {
         self.reload_processes_confirm_open = true;
+    }
+
+    fn process_config(&self, process_id: &str) -> Option<ProcessConfig> {
+        self.manager
+            .get_process_config(process_id)
+            .or_else(|| self.config.get_process(process_id).cloned())
+    }
+
+    fn reload_process_from_disk(&mut self, process_id: &str) {
+        let config = match AppConfig::load_from_disk() {
+            Ok(mut config) => {
+                config.normalize();
+                config
+            }
+            Err(err) => {
+                self.set_banner(format!("Failed to reload processes.json: {}", err));
+                return;
+            }
+        };
+
+        let Some(updated) = config.processes.iter().find(|process| process.id == process_id) else {
+            self.set_banner(format!(
+                "Process id '{}' not found in processes.json.",
+                process_id
+            ));
+            return;
+        };
+
+        if !self
+            .manager
+            .reload_process_from_config(updated.clone())
+        {
+            self.set_banner(format!(
+                "Process '{}' is not currently managed in this session.",
+                process_id
+            ));
+            return;
+        }
+
+        self.config.update_process(process_id, updated.clone());
+        self.last_process_error_versions = self.manager.error_versions();
+        self.process_row_flashes.remove(process_id);
+        self.refresh_runtime_snapshot(true);
+        self.set_banner(format!("Reloaded '{}' from processes.json.", updated.name));
     }
 
     fn cancel_reload_processes_confirmation(&mut self) {
@@ -1104,8 +1148,7 @@ impl ProcessManagerApp {
     fn selected_process_config(&self) -> Option<ProcessConfig> {
         self.selected_process
             .as_ref()
-            .and_then(|id| self.config.get_process(id))
-            .cloned()
+            .and_then(|id| self.process_config(id))
     }
 
     fn refresh_runtime_snapshot(&mut self, force: bool) {
@@ -1803,6 +1846,7 @@ impl ProcessManagerApp {
                                 let process_count = self.config.processes.len();
                                 let mut move_up_id: Option<String> = None;
                                 let mut move_down_id: Option<String> = None;
+                                let mut reload_process_id: Option<String> = None;
                                 let mut reorder_to: Option<(String, usize)> = None;
                                 let mut drag_insert_index: Option<usize> = None;
                                 let mut row_bounds: Vec<egui::Rect> = Vec::with_capacity(process_count);
@@ -1810,24 +1854,25 @@ impl ProcessManagerApp {
                                 for (index, process) in
                                     self.config.processes.clone().into_iter().enumerate()
                                 {
+                                    let row_process =
+                                        self.process_config(&process.id).unwrap_or(process.clone());
                                     let status = self
                                         .runtime_snapshot
                                         .statuses
-                                        .get(&process.id)
+                                        .get(&row_process.id)
                                         .cloned()
                                         .unwrap_or(ProcessStatus::Stopped);
-                                    let is_selected = self.selected_process.as_deref()
-                                        == Some(process.id.as_str());
+                                    let is_selected = self.selected_process.as_deref() == Some(process.id.as_str());
                                     let flash_intensity =
-                                        self.process_row_flash_intensity(ctx, &process.id);
+                                        self.process_row_flash_intensity(ctx, &row_process.id);
                                     let row_response = draw_process_row(
                                         ui,
-                                        &process,
+                                        &row_process,
                                         &status,
                                         is_selected,
                                         flash_intensity,
                                     );
-                                    self.update_process_label_hover(ui, &row_response, &process);
+                                    self.update_process_label_hover(ui, &row_response, &row_process);
                                     let row_clicked = row_response.clicked();
                                     if row_response.drag_started() {
                                         self.dragged_process = Some(process.id.clone());
@@ -1862,6 +1907,10 @@ impl ProcessManagerApp {
                                             .clicked()
                                         {
                                             move_down_id = Some(process.id.clone());
+                                            ui.close();
+                                        }
+                                        if ui.button("Reload").clicked() {
+                                            reload_process_id = Some(process.id.clone());
                                             ui.close();
                                         }
                                     });
@@ -1899,6 +1948,8 @@ impl ProcessManagerApp {
                                     self.move_process_up(&process_id);
                                 } else if let Some(process_id) = move_down_id {
                                     self.move_process_down(&process_id);
+                                } else if let Some(process_id) = reload_process_id {
+                                    self.reload_process_from_disk(&process_id);
                                 }
                             });
                     });

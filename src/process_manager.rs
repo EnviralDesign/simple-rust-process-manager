@@ -1157,6 +1157,37 @@ impl ProcessManager {
         processes.get(id).map(|s| s.status.clone())
     }
 
+    pub fn get_process_config(&self, id: &str) -> Option<ProcessConfig> {
+        let processes = self.processes.lock().unwrap();
+        processes.get(id).map(|state| state.config.clone())
+    }
+
+    /// Replace a single managed process with a new config, stopping it first if needed.
+    pub fn reload_process_from_config(&self, config: ProcessConfig) -> bool {
+        let process_id = config.id.clone();
+        if self.processes.lock().unwrap().get(&process_id).is_none() {
+            return false;
+        }
+
+        if matches!(
+            self.get_status(&process_id),
+            Some(ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Stopping)
+        ) {
+            self.stop_process(&process_id);
+            let _ = self.wait_for_processes_to_stop(&[process_id.clone()], Duration::from_secs(5));
+        }
+
+        let mut processes = self.processes.lock().unwrap();
+        if let Some(state) = processes.get_mut(&process_id) {
+            state.config = config;
+            self.update_docker_polling_flag_locked(&processes);
+            self.notify();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn get_recent_logs(&self, id: &str, limit: usize) -> Option<Vec<String>> {
         let processes = self.processes.lock().unwrap();
         processes.get(id).map(|state| {
