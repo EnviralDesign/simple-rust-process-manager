@@ -22,7 +22,9 @@ use crate::config::{
     DEFAULT_STARTUP_DELAY_SECONDS, WEEKLY_HOUR_COUNT,
 };
 use crate::log_classification::contains_error_indicator;
-use crate::process_manager::{ProcessCounts, ProcessManager, ProcessStatus, UiRuntimeSnapshot};
+use crate::process_manager::{
+    ProcessCounts, ProcessManager, ProcessResourceUsage, ProcessStatus, UiRuntimeSnapshot,
+};
 use crate::rest_api::{build_agent_bootstrap, RestServerController, RestServerSnapshot};
 
 const SHELL_BG: Color32 = Color32::from_rgb(32, 32, 36); // Fixed shell / native caption chrome
@@ -844,7 +846,11 @@ impl ProcessManagerApp {
             }
         };
 
-        let Some(updated) = config.processes.iter().find(|process| process.id == process_id) else {
+        let Some(updated) = config
+            .processes
+            .iter()
+            .find(|process| process.id == process_id)
+        else {
             self.set_banner(format!(
                 "Process id '{}' not found in processes.json.",
                 process_id
@@ -852,10 +858,7 @@ impl ProcessManagerApp {
             return;
         };
 
-        if !self
-            .manager
-            .reload_process_from_config(updated.clone())
-        {
+        if !self.manager.reload_process_from_config(updated.clone()) {
             self.set_banner(format!(
                 "Process '{}' is not currently managed in this session.",
                 process_id
@@ -1113,12 +1116,7 @@ impl ProcessManagerApp {
         }
     }
 
-    fn draw_drag_insert_marker(
-        &self,
-        ui: &mut Ui,
-        row_bounds: &[egui::Rect],
-        insert_index: usize,
-    ) {
+    fn draw_drag_insert_marker(&self, ui: &mut Ui, row_bounds: &[egui::Rect], insert_index: usize) {
         if row_bounds.is_empty() {
             return;
         }
@@ -1842,14 +1840,15 @@ impl ProcessManagerApp {
 
                         ScrollArea::vertical()
                             .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                            .show(ui, |ui| {
                                 let process_count = self.config.processes.len();
                                 let mut move_up_id: Option<String> = None;
                                 let mut move_down_id: Option<String> = None;
                                 let mut reload_process_id: Option<String> = None;
                                 let mut reorder_to: Option<(String, usize)> = None;
                                 let mut drag_insert_index: Option<usize> = None;
-                                let mut row_bounds: Vec<egui::Rect> = Vec::with_capacity(process_count);
+                                let mut row_bounds: Vec<egui::Rect> =
+                                    Vec::with_capacity(process_count);
 
                                 for (index, process) in
                                     self.config.processes.clone().into_iter().enumerate()
@@ -1862,17 +1861,28 @@ impl ProcessManagerApp {
                                         .get(&row_process.id)
                                         .cloned()
                                         .unwrap_or(ProcessStatus::Stopped);
-                                    let is_selected = self.selected_process.as_deref() == Some(process.id.as_str());
+                                    let resource_usage = self
+                                        .runtime_snapshot
+                                        .resource_usage
+                                        .get(&row_process.id)
+                                        .copied();
+                                    let is_selected = self.selected_process.as_deref()
+                                        == Some(process.id.as_str());
                                     let flash_intensity =
                                         self.process_row_flash_intensity(ctx, &row_process.id);
                                     let row_response = draw_process_row(
                                         ui,
                                         &row_process,
                                         &status,
+                                        resource_usage,
                                         is_selected,
                                         flash_intensity,
                                     );
-                                    self.update_process_label_hover(ui, &row_response, &row_process);
+                                    self.update_process_label_hover(
+                                        ui,
+                                        &row_response,
+                                        &row_process,
+                                    );
                                     let row_clicked = row_response.clicked();
                                     if row_response.drag_started() {
                                         self.dragged_process = Some(process.id.clone());
@@ -1921,7 +1931,9 @@ impl ProcessManagerApp {
                                     ui.add_space(2.0);
                                 }
 
-                                if self.dragged_process.is_some() && ctx.input(|input| input.pointer.primary_down()) {
+                                if self.dragged_process.is_some()
+                                    && ctx.input(|input| input.pointer.primary_down())
+                                {
                                     let can_place_at_end = !row_bounds.is_empty()
                                         && process_count > 0
                                         && row_bounds.last().is_some_and(|last_rect| {
@@ -2022,13 +2034,27 @@ impl ProcessManagerApp {
         let auto_start = if process.auto_start { "ON" } else { "OFF" };
         let managed_restart = if process.auto_restart { "ON" } else { "OFF" };
         let global_controls = global_controls_summary(process);
+        let status = self
+            .runtime_snapshot
+            .statuses
+            .get(&process.id)
+            .cloned()
+            .unwrap_or(ProcessStatus::Stopped);
+        let resource_usage = self
+            .runtime_snapshot
+            .resource_usage
+            .get(&process.id)
+            .copied();
+        let resource_summary =
+            resource_usage_text(resource_usage, &status).unwrap_or_else(|| "--".to_string());
         let metadata = format!(
-            "{} | {} | auto-start {} | delay {}s | restart {} | global {}",
+            "{} | {} | {} | auto-start {} | delay {}s | restart {} | global {}",
             match &process.process_type {
                 ProcessType::Process => "Process",
                 ProcessType::Docker => "Docker",
             },
             &process.command,
+            resource_summary,
             auto_start,
             process.startup_delay_seconds,
             managed_restart,
@@ -3273,11 +3299,12 @@ fn draw_process_row(
     ui: &mut Ui,
     process: &ProcessConfig,
     status: &ProcessStatus,
+    resource_usage: Option<ProcessResourceUsage>,
     selected: bool,
     flash_intensity: f32,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 32.0),
+        egui::vec2(ui.available_width(), 34.0),
         egui::Sense::click_and_drag(),
     );
 
@@ -3315,13 +3342,33 @@ fn draw_process_row(
     }
 
     let inner_rect = rect.shrink2(egui::vec2(14.0, 0.0));
+    let metric_text = compact_resource_usage_text(resource_usage);
+    let metric_width = if let Some(metric_text) = metric_text.as_deref() {
+        ui.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    metric_text.to_string(),
+                    FontId::proportional(11.0),
+                    TEXT_MUTED,
+                )
+                .size()
+                .x
+        }) + 10.0
+    } else {
+        0.0
+    };
     let dot_center = egui::pos2(inner_rect.min.x + 10.0, rect.center().y);
     ui.painter()
         .circle_filled(dot_center, 4.0, status_color(status, ui.ctx()));
     let text_pos = egui::pos2(dot_center.x + 14.0, rect.center().y);
     let font_id = FontId::proportional(13.5);
     let text_color = if selected { TEXT_MAIN } else { TEXT_MUTED };
-    ui.painter().text(
+    let name_clip_right = (inner_rect.max.x - metric_width).max(text_pos.x + 24.0);
+    let name_painter = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+        egui::pos2(text_pos.x, rect.min.y),
+        egui::pos2(name_clip_right, rect.max.y),
+    ));
+    name_painter.text(
         text_pos,
         Align2::LEFT_CENTER,
         &process.name,
@@ -3338,7 +3385,7 @@ fn draw_process_row(
                 .x
         });
         let marker_color = if selected { TEXT_SOFT } else { STOPPED };
-        ui.painter().text(
+        name_painter.text(
             egui::pos2(text_pos.x + name_width, text_pos.y),
             Align2::LEFT_CENTER,
             marker_text,
@@ -3347,7 +3394,69 @@ fn draw_process_row(
         );
     }
 
+    if let Some(metric_text) = metric_text {
+        let metric_color = if selected { TEXT_SOFT } else { STOPPED };
+        ui.painter().text(
+            egui::pos2(inner_rect.max.x, rect.center().y),
+            Align2::RIGHT_CENTER,
+            metric_text,
+            FontId::proportional(11.0),
+            metric_color,
+        );
+    }
+
     response
+}
+
+fn compact_resource_usage_text(usage: Option<ProcessResourceUsage>) -> Option<String> {
+    let usage = usage?;
+    if usage.cpu_percent.is_none() && usage.memory_bytes.is_none() {
+        return None;
+    }
+
+    Some(format!(
+        "{} {}",
+        format_cpu_percent(usage.cpu_percent),
+        format_memory_bytes(usage.memory_bytes)
+    ))
+}
+
+fn resource_usage_text(
+    usage: Option<ProcessResourceUsage>,
+    _status: &ProcessStatus,
+) -> Option<String> {
+    let usage = usage?;
+    if usage.cpu_percent.is_none() && usage.memory_bytes.is_none() {
+        return None;
+    }
+
+    Some(format!(
+        "{} CPU | {} RAM",
+        format_cpu_percent(usage.cpu_percent),
+        format_memory_bytes(usage.memory_bytes)
+    ))
+}
+
+fn format_cpu_percent(value: Option<f32>) -> String {
+    match value {
+        Some(value) if value < 9.95 => format!("{:.1}%", value.max(0.0)),
+        Some(value) => format!("{:.0}%", value.max(0.0)),
+        None => "--%".to_string(),
+    }
+}
+
+fn format_memory_bytes(value: Option<u64>) -> String {
+    let Some(bytes) = value else {
+        return "--".to_string();
+    };
+    let mib = bytes as f64 / 1_048_576.0;
+    if mib >= 1024.0 {
+        format!("{:.1} GB", mib / 1024.0)
+    } else if mib >= 10.0 {
+        format!("{:.0} MB", mib)
+    } else {
+        format!("{:.1} MB", mib)
+    }
 }
 
 fn field_label(text: &str) -> RichText {

@@ -21,6 +21,8 @@ use crate::log_classification::contains_error_indicator;
 
 const IN_MEMORY_LOG_LIMIT: usize = 1000;
 const PROCESS_LOG_FOLDER_NAME: &str = "Process Manager logs";
+const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const CPU_TIME_UNITS_PER_SECOND: f64 = 10_000_000.0;
 
 type SharedLogFile = Arc<Mutex<File>>;
 
@@ -53,7 +55,9 @@ pub struct ProcessState {
     pub logs: Vec<String>,
     pub disk_log: Option<SharedLogFile>,
     pub child: Option<Child>,
+    pub resource_usage: ProcessResourceUsage,
     pub suppress_restart_once: bool,
+    resource_sample: Option<ResourceSample>,
     start_generation: u64,
     #[cfg(windows)]
     pub job: Option<JobHandle>,
@@ -67,7 +71,9 @@ impl ProcessState {
             logs: Vec::new(),
             disk_log: None,
             child: None,
+            resource_usage: ProcessResourceUsage::default(),
             suppress_restart_once: false,
+            resource_sample: None,
             start_generation: 0,
             #[cfg(windows)]
             job: None,
@@ -83,6 +89,9 @@ pub struct ProcessRuntimeSnapshot {
     pub process_type: String,
     pub status: String,
     pub status_detail: Option<String>,
+    pub pid: Option<u32>,
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: Option<u64>,
     pub auto_start: bool,
     pub startup_delay_seconds: u64,
     pub auto_restart: bool,
@@ -103,10 +112,29 @@ pub struct ProcessCounts {
     pub error: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct ProcessResourceUsage {
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResourceSample {
+    measured_at: Instant,
+    cpu_time_100ns: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResourceCounterSample {
+    cpu_time_100ns: Option<u64>,
+    memory_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UiRuntimeSnapshot {
     pub counts: ProcessCounts,
     pub statuses: HashMap<String, ProcessStatus>,
+    pub resource_usage: HashMap<String, ProcessResourceUsage>,
     pub selected_logs: Vec<String>,
     pub selected_log_count: usize,
 }
@@ -243,6 +271,17 @@ impl ProcessManager {
                 &schedule_state,
             );
         });
+
+        let processes = self.processes.clone();
+        let event_tx = self.event_tx.clone();
+        let event_version = self.event_version.clone();
+
+        thread::spawn(move || loop {
+            thread::sleep(RESOURCE_SAMPLE_INTERVAL);
+            if refresh_resource_usage(&processes) {
+                bump_event(&event_tx, &event_version);
+            }
+        });
     }
 
     /// Initialize process states from config
@@ -277,7 +316,9 @@ impl ProcessManager {
         for config in configs {
             let process_id = config.id.clone();
             processes.insert(process_id.clone(), ProcessState::new(config.clone()));
-            process_error_versions.entry(process_id.clone()).or_insert(0);
+            process_error_versions
+                .entry(process_id.clone())
+                .or_insert(0);
             schedule_state.entry(process_id).or_default();
         }
 
@@ -355,6 +396,7 @@ impl ProcessManager {
                 state.status = ProcessStatus::Starting;
                 state.logs.clear();
                 state.disk_log = None;
+                let _ = clear_resource_usage(state);
                 state.start_generation = state.start_generation.wrapping_add(1);
                 let start_generation = state.start_generation;
                 bump_event(&event_tx, &event_version);
@@ -415,12 +457,13 @@ impl ProcessManager {
             println!("[DEBUG] Thread spawned for command: {}", command);
             println!("[DEBUG] Working dir: '{}'", working_dir);
 
-        let (program, args) = match parse_command(&command) {
+            let (program, args) = match parse_command(&command) {
                 Ok((program, args)) => (program, args),
                 Err(e) => {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.clone());
+                        let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
                     bump_error(&error_version, &process_error_versions, &id_owned);
@@ -436,6 +479,7 @@ impl ProcessManager {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.clone());
+                        let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
                     bump_error(&error_version, &process_error_versions, &id_owned);
@@ -697,6 +741,7 @@ impl ProcessManager {
                                                 state.suppress_restart_once = false;
                                                 state.child = None;
                                                 state.disk_log = None;
+                                                let _ = clear_resource_usage(state);
                                                 #[cfg(windows)]
                                                 {
                                                     state.job = None;
@@ -711,6 +756,7 @@ impl ProcessManager {
                                                 state.status = ProcessStatus::Error(e.to_string());
                                                 state.child = None;
                                                 state.disk_log = None;
+                                                let _ = clear_resource_usage(state);
                                                 #[cfg(windows)]
                                                 {
                                                     state.job = None;
@@ -758,6 +804,7 @@ impl ProcessManager {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.to_string());
+                        let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
                     }
                     bump_error(&error_version, &process_error_versions, &id_owned);
@@ -841,6 +888,7 @@ impl ProcessManager {
                         } else {
                             let stderr = String::from_utf8_lossy(&output.stderr);
                             state.status = ProcessStatus::Error(stderr.to_string());
+                            let _ = clear_resource_usage(state);
                             log_process_state_event(
                                 state,
                                 format!("[Failed to start: {}]", stderr),
@@ -855,6 +903,7 @@ impl ProcessManager {
                     let mut processes = processes_arc.lock().unwrap();
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.status = ProcessStatus::Error(e.to_string());
+                        let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start docker: {}]", e));
                         state.disk_log = None;
                     }
@@ -1076,9 +1125,12 @@ impl ProcessManager {
             let all_stopped = {
                 let processes = self.processes.lock().unwrap();
                 ids.iter().all(|id| {
-                    processes
-                        .get(id)
-                        .map_or(true, |state| matches!(state.status, ProcessStatus::Stopped | ProcessStatus::Error(_)))
+                    processes.get(id).map_or(true, |state| {
+                        matches!(
+                            state.status,
+                            ProcessStatus::Stopped | ProcessStatus::Error(_)
+                        )
+                    })
                 })
             };
 
@@ -1146,6 +1198,7 @@ impl ProcessManager {
                     state.job = None;
                 }
                 state.status = ProcessStatus::Stopped;
+                let _ = clear_resource_usage(state);
             }
         }
         self.notify();
@@ -1247,11 +1300,13 @@ impl ProcessManager {
             ..ProcessCounts::default()
         };
         let mut statuses = HashMap::with_capacity(processes.len());
+        let mut resource_usage = HashMap::with_capacity(processes.len());
         let mut selected_logs = Vec::new();
         let mut selected_log_count = 0usize;
 
         for (id, state) in processes.iter() {
             statuses.insert(id.clone(), state.status.clone());
+            resource_usage.insert(id.clone(), state.resource_usage);
 
             match &state.status {
                 ProcessStatus::Running => counts.running += 1,
@@ -1271,6 +1326,7 @@ impl ProcessManager {
         UiRuntimeSnapshot {
             counts,
             statuses,
+            resource_usage,
             selected_logs,
             selected_log_count,
         }
@@ -1288,6 +1344,320 @@ impl ProcessManager {
             &self.error_version,
             &self.process_error_versions,
         );
+    }
+}
+
+fn refresh_resource_usage(processes: &Arc<Mutex<HashMap<String, ProcessState>>>) -> bool {
+    let now = Instant::now();
+    let processor_count = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .max(1) as f64;
+    let mut updated = false;
+    let mut processes = processes.lock().unwrap();
+
+    for state in processes.values_mut() {
+        if state.config.process_type != ProcessType::Process
+            || state.status != ProcessStatus::Running
+        {
+            updated |= clear_resource_usage(state);
+            continue;
+        }
+
+        let Some(pid) = state.child.as_ref().map(|child| child.id()) else {
+            updated |= clear_resource_usage(state);
+            continue;
+        };
+
+        let Some(sample) = sample_process_resources(state, pid) else {
+            updated |= clear_resource_usage(state);
+            continue;
+        };
+
+        let cpu_percent = match (state.resource_sample, sample.cpu_time_100ns) {
+            (Some(previous), Some(cpu_time_100ns)) => {
+                let elapsed_seconds = now
+                    .saturating_duration_since(previous.measured_at)
+                    .as_secs_f64();
+                if elapsed_seconds > 0.0 {
+                    let cpu_delta_seconds = cpu_time_100ns.saturating_sub(previous.cpu_time_100ns)
+                        as f64
+                        / CPU_TIME_UNITS_PER_SECOND;
+                    Some(
+                        ((cpu_delta_seconds / elapsed_seconds) / processor_count * 100.0)
+                            .clamp(0.0, 100.0) as f32,
+                    )
+                } else {
+                    state.resource_usage.cpu_percent
+                }
+            }
+            _ => state.resource_usage.cpu_percent,
+        };
+
+        if let Some(cpu_time_100ns) = sample.cpu_time_100ns {
+            state.resource_sample = Some(ResourceSample {
+                measured_at: now,
+                cpu_time_100ns,
+            });
+        }
+
+        let new_usage = ProcessResourceUsage {
+            cpu_percent,
+            memory_bytes: sample.memory_bytes,
+        };
+
+        if resource_usage_changed(state.resource_usage, new_usage) {
+            state.resource_usage = new_usage;
+            updated = true;
+        }
+    }
+
+    updated
+}
+
+fn clear_resource_usage(state: &mut ProcessState) -> bool {
+    let changed =
+        state.resource_usage != ProcessResourceUsage::default() || state.resource_sample.is_some();
+    state.resource_usage = ProcessResourceUsage::default();
+    state.resource_sample = None;
+    changed
+}
+
+fn resource_usage_changed(previous: ProcessResourceUsage, next: ProcessResourceUsage) -> bool {
+    previous.memory_bytes != next.memory_bytes
+        || match (previous.cpu_percent, next.cpu_percent) {
+            (Some(previous), Some(next)) => (previous - next).abs() >= 0.05,
+            (None, None) => false,
+            _ => true,
+        }
+}
+
+#[cfg(not(windows))]
+fn sample_process_resources(
+    _state: &ProcessState,
+    _root_pid: u32,
+) -> Option<ResourceCounterSample> {
+    None
+}
+
+#[cfg(windows)]
+fn sample_process_resources(state: &ProcessState, root_pid: u32) -> Option<ResourceCounterSample> {
+    let pids = state
+        .job
+        .as_ref()
+        .and_then(|job| query_job_process_ids(job.handle))
+        .filter(|pids| !pids.is_empty())
+        .unwrap_or_else(|| vec![root_pid]);
+
+    let cpu_time_100ns = state
+        .job
+        .as_ref()
+        .and_then(|job| query_job_cpu_time(job.handle))
+        .or_else(|| sum_process_cpu_time(&pids));
+    let memory_bytes = sum_process_memory(&pids);
+
+    if cpu_time_100ns.is_none() && memory_bytes.is_none() {
+        None
+    } else {
+        Some(ResourceCounterSample {
+            cpu_time_100ns,
+            memory_bytes,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn query_job_cpu_time(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectBasicAccountingInformation, QueryInformationJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    };
+
+    let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        QueryInformationJobObject(
+            handle,
+            JobObjectBasicAccountingInformation,
+            &mut accounting as *mut _ as *mut _,
+            std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if ok == 0 {
+        None
+    } else {
+        let total = accounting
+            .TotalUserTime
+            .saturating_add(accounting.TotalKernelTime);
+        u64::try_from(total).ok()
+    }
+}
+
+#[cfg(windows)]
+fn query_job_process_ids(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<Vec<u32>> {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    };
+
+    let mut capacity = 16usize;
+    while capacity <= 4096 {
+        let byte_len = std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
+            + capacity
+                .saturating_sub(1)
+                .saturating_mul(std::mem::size_of::<usize>());
+        let mut buffer = vec![0u8; byte_len];
+        let ok = unsafe {
+            QueryInformationJobObject(
+                handle,
+                JobObjectBasicProcessIdList,
+                buffer.as_mut_ptr() as *mut _,
+                byte_len as u32,
+                std::ptr::null_mut(),
+            )
+        };
+
+        if ok == 0 {
+            capacity = capacity.saturating_mul(2);
+            continue;
+        }
+
+        let list = unsafe { &*(buffer.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
+        let assigned_count = list.NumberOfAssignedProcesses as usize;
+        let listed_count = list.NumberOfProcessIdsInList as usize;
+
+        if assigned_count > listed_count && assigned_count > capacity {
+            capacity = assigned_count.next_power_of_two().min(4096);
+            continue;
+        }
+
+        let count = listed_count.min(assigned_count).min(capacity);
+        let process_ids = unsafe { std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count) };
+        return Some(
+            process_ids
+                .iter()
+                .filter_map(|pid| u32::try_from(*pid).ok())
+                .collect(),
+        );
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn sum_process_cpu_time(pids: &[u32]) -> Option<u64> {
+    let mut total = 0u64;
+    let mut sampled = false;
+
+    for &pid in pids {
+        if let Some(handle) = open_process_for_metrics(pid) {
+            if let Some(cpu_time) = process_cpu_time(handle.raw()) {
+                total = total.saturating_add(cpu_time);
+                sampled = true;
+            }
+        }
+    }
+
+    sampled.then_some(total)
+}
+
+#[cfg(windows)]
+fn sum_process_memory(pids: &[u32]) -> Option<u64> {
+    let mut total = 0u64;
+    let mut sampled = false;
+
+    for &pid in pids {
+        if let Some(handle) = open_process_for_metrics(pid) {
+            if let Some(bytes) = process_working_set_bytes(handle.raw()) {
+                total = total.saturating_add(bytes);
+                sampled = true;
+            }
+        }
+    }
+
+    sampled.then_some(total)
+}
+
+#[cfg(windows)]
+fn process_cpu_time(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut creation_time: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exit_time: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel_time: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user_time: FILETIME = unsafe { std::mem::zeroed() };
+
+    let ok = unsafe {
+        GetProcessTimes(
+            handle,
+            &mut creation_time,
+            &mut exit_time,
+            &mut kernel_time,
+            &mut user_time,
+        )
+    };
+
+    if ok == 0 {
+        None
+    } else {
+        Some(filetime_to_u64(kernel_time).saturating_add(filetime_to_u64(user_time)))
+    }
+}
+
+#[cfg(windows)]
+fn process_working_set_bytes(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+
+    let ok = unsafe { K32GetProcessMemoryInfo(handle, &mut counters, counters.cb) };
+    if ok == 0 {
+        None
+    } else {
+        Some(counters.WorkingSetSize as u64)
+    }
+}
+
+#[cfg(windows)]
+fn filetime_to_u64(value: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
+}
+
+#[cfg(windows)]
+struct ScopedProcessHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ScopedProcessHandle {
+    fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ScopedProcessHandle {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_process_for_metrics(pid: u32) -> Option<ScopedProcessHandle> {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
+    let handle =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid) };
+    if handle.is_null() {
+        None
+    } else {
+        Some(ScopedProcessHandle(handle))
     }
 }
 
@@ -1487,6 +1857,7 @@ fn sanitize_path_component(value: &str) -> String {
 
 fn process_snapshot_from_state(state: &ProcessState) -> ProcessRuntimeSnapshot {
     let (status, status_detail) = status_parts(&state.status);
+    let pid = state.child.as_ref().map(|child| child.id());
 
     ProcessRuntimeSnapshot {
         id: state.config.id.clone(),
@@ -1494,6 +1865,9 @@ fn process_snapshot_from_state(state: &ProcessState) -> ProcessRuntimeSnapshot {
         process_type: state.config.process_type.to_string(),
         status,
         status_detail,
+        pid,
+        cpu_percent: state.resource_usage.cpu_percent,
+        memory_bytes: state.resource_usage.memory_bytes,
         auto_start: state.config.auto_start,
         startup_delay_seconds: state.config.startup_delay_seconds,
         auto_restart: state.config.auto_restart,
@@ -1664,6 +2038,7 @@ fn stop_process_inner(
                         {
                             state.job = None;
                         }
+                        let _ = clear_resource_usage(state);
                     }
                 }
                 ProcessType::Docker => {
@@ -1714,6 +2089,7 @@ fn stop_process_inner(
                 log_process_state_event(state, "[Process stopped]".to_string());
                 state.status = ProcessStatus::Stopped;
                 state.disk_log = None;
+                let _ = clear_resource_usage(state);
             }
             bump_event(&event_tx, &event_version);
         });
@@ -1754,6 +2130,7 @@ fn stop_process_inner(
                     }
                 }
                 state.disk_log = None;
+                let _ = clear_resource_usage(state);
             }
             bump_event(&event_tx, &event_version);
         });
@@ -1806,6 +2183,7 @@ fn run_scheduler_tick(
                     state.status = ProcessStatus::Starting;
                     state.logs.clear();
                     state.disk_log = None;
+                    let _ = clear_resource_usage(state);
                     state.start_generation = state.start_generation.wrapping_add(1);
                     log_process_state_event(
                         state,
@@ -1844,6 +2222,7 @@ fn run_scheduler_tick(
                     state.status = ProcessStatus::Starting;
                     state.logs.clear();
                     state.disk_log = None;
+                    let _ = clear_resource_usage(state);
                     state.start_generation = state.start_generation.wrapping_add(1);
                     log_process_state_event(
                         state,
@@ -1947,6 +2326,7 @@ fn schedule_managed_restart(
             state.status = ProcessStatus::Starting;
             state.logs.clear();
             state.disk_log = None;
+            let _ = clear_resource_usage(state);
             state.start_generation = state.start_generation.wrapping_add(1);
             (state.config.clone(), state.start_generation)
         };
@@ -2042,7 +2422,11 @@ fn assign_job(job: &JobHandle, child: &Child) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn build_command(program: &str, args: &[String], _working_directory: &str) -> Result<(Command, String), String> {
+fn build_command(
+    program: &str,
+    args: &[String],
+    _working_directory: &str,
+) -> Result<(Command, String), String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     Ok((cmd, program.to_string()))
@@ -2097,7 +2481,7 @@ fn resolve_program(program: &str, working_directory: &str) -> Result<ResolvedPro
     }
 
     let working_directory = working_directory.trim();
-        // Support pasted quoted working directories like "C:\\path with spaces".
+    // Support pasted quoted working directories like "C:\\path with spaces".
     let working_directory = working_directory.trim_matches('"');
     if !working_directory.is_empty() {
         let working_directory = Path::new(working_directory);

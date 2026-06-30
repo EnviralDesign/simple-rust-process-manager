@@ -421,7 +421,9 @@ async fn reload_stack(State(state): State<ApiState>) -> impl IntoResponse {
     if let Ok(mut stack_name) = state.stack_name.write() {
         *stack_name = config.stack_name.clone();
     }
-    state.manager.set_log_directory(config.log_directory.clone());
+    state
+        .manager
+        .set_log_directory(config.log_directory.clone());
     state.manager.reload_from_config(&config.processes);
     Json(stack_ack_with_message(
         "reload",
@@ -472,7 +474,11 @@ async fn reload_process(
 
     config.normalize();
 
-    let updated_process = match config.processes.into_iter().find(|process| process.id == id) {
+    let updated_process = match config
+        .processes
+        .into_iter()
+        .find(|process| process.id == id)
+    {
         Some(process) => process,
         None => {
             return (
@@ -507,7 +513,10 @@ async fn reload_process(
             scope: "process",
             action: "reload",
             target_id: Some(id),
-            message: format!("Reloaded process '{}' from processes.json.", updated_process.name),
+            message: format!(
+                "Reloaded process '{}' from processes.json.",
+                updated_process.name
+            ),
         }),
     )
         .into_response()
@@ -529,12 +538,12 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
             EndpointDoc {
                 method: "GET",
                 path: "/processes",
-                description: "Returns all managed processes with ids and runtime status.",
+                description: "Returns all managed processes with ids, runtime status, PID, CPU percent, and RAM bytes.",
             },
             EndpointDoc {
                 method: "GET",
                 path: "/processes/{id}",
-                description: "Returns one managed process by stable id.",
+                description: "Returns one managed process by stable id, including PID, CPU percent, and RAM bytes.",
             },
             EndpointDoc {
                 method: "GET",
@@ -666,6 +675,24 @@ fn current_stack_name(stack_name: &Arc<RwLock<String>>) -> String {
         .unwrap_or_else(|_| String::new())
 }
 
+fn format_optional_u32(value: Option<u32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "--".to_string())
+}
+
+fn format_optional_cpu(value: Option<f32>) -> String {
+    value
+        .map(|value| format!("{:.1}%", value))
+        .unwrap_or_else(|| "--".to_string())
+}
+
+fn format_optional_bytes(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "--".to_string())
+}
+
 pub fn build_agent_bootstrap(
     stack_name: &str,
     remote_control: &RemoteControlConfig,
@@ -683,7 +710,7 @@ pub fn build_agent_bootstrap(
         String::new(),
         "Usage".to_string(),
         "1. Call GET /health to confirm the server is reachable.".to_string(),
-        "2. Call GET /processes to discover process ids and current statuses.".to_string(),
+        "2. Call GET /processes to discover process ids, current statuses, PID, CPU percent, and RAM bytes.".to_string(),
         "3. Call GET /processes/{id}/logs?limit=200 to fetch the latest log tail for a component."
             .to_string(),
         "4. Use POST /stack/reload to reread processes.json from disk. This stops all managed processes first, regardless of status or stack-control settings.".to_string(),
@@ -719,11 +746,14 @@ pub fn build_agent_bootstrap(
     } else {
         for process in processes {
             lines.push(format!(
-                "- {} | id={} | type={} | status={} | auto_start={} | startup_delay_seconds={} | auto_restart={} | stack_start={} | stack_stop={} | stack_restart={}",
+                "- {} | id={} | type={} | status={} | pid={} | cpu={} | ram_bytes={} | auto_start={} | startup_delay_seconds={} | auto_restart={} | stack_start={} | stack_stop={} | stack_restart={}",
                 process.name,
                 process.id,
                 process.process_type,
                 process.status,
+                format_optional_u32(process.pid),
+                format_optional_cpu(process.cpu_percent),
+                format_optional_bytes(process.memory_bytes),
                 process.auto_start,
                 process.startup_delay_seconds,
                 process.auto_restart,
