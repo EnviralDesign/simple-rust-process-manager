@@ -415,7 +415,7 @@ impl ProcessManager {
             println!("[DEBUG] Thread spawned for command: {}", command);
             println!("[DEBUG] Working dir: '{}'", working_dir);
 
-            let (program, args) = match parse_command(&command) {
+        let (program, args) = match parse_command(&command) {
                 Ok((program, args)) => (program, args),
                 Err(e) => {
                     let mut processes = processes_arc.lock().unwrap();
@@ -430,7 +430,7 @@ impl ProcessManager {
             };
 
             // Build command (direct spawn; on Windows, .cmd/.bat are routed through cmd)
-            let (mut cmd, program_label) = match build_command(&program, &args) {
+            let (mut cmd, program_label) = match build_command(&program, &args, &working_dir) {
                 Ok(result) => result,
                 Err(e) => {
                     let mut processes = processes_arc.lock().unwrap();
@@ -2041,13 +2041,30 @@ fn assign_job(job: &JobHandle, child: &Child) -> Result<(), String> {
     }
 }
 
+#[cfg(not(windows))]
+fn build_command(program: &str, args: &[String], _working_directory: &str) -> Result<(Command, String), String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    Ok((cmd, program.to_string()))
+}
+
 #[cfg(windows)]
-fn build_command(program: &str, args: &[String]) -> Result<(Command, String), String> {
-    let resolved = resolve_program(program)?;
+struct ResolvedProgram {
+    path: String,
+    is_cmd_script: bool,
+}
+
+#[cfg(windows)]
+fn build_command(
+    program: &str,
+    args: &[String],
+    working_directory: &str,
+) -> Result<(Command, String), String> {
+    let resolved = resolve_program(program, working_directory)?;
     if resolved.is_cmd_script {
         // Don't pre-quote! Let Rust's Command API handle argument quoting.
         // Previously we used build_cmdline() which quoted the path, then
-        // cmd.args(["/S", "/C", &cmdline]) caused Rust to quote the whole
+        // cmd.args([\"/S\", \"/C\", &cmdline]) caused Rust to quote the whole
         // cmdline again, resulting in literal backslash-quote characters.
         let mut cmd = Command::new("cmd");
         cmd.arg("/C");
@@ -2061,21 +2078,8 @@ fn build_command(program: &str, args: &[String]) -> Result<(Command, String), St
     }
 }
 
-#[cfg(not(windows))]
-fn build_command(program: &str, args: &[String]) -> Result<(Command, String), String> {
-    let mut cmd = Command::new(program);
-    cmd.args(args);
-    Ok((cmd, program.to_string()))
-}
-
 #[cfg(windows)]
-struct ResolvedProgram {
-    path: String,
-    is_cmd_script: bool,
-}
-
-#[cfg(windows)]
-fn resolve_program(program: &str) -> Result<ResolvedProgram, String> {
+fn resolve_program(program: &str, working_directory: &str) -> Result<ResolvedProgram, String> {
     use std::env;
     use std::path::Path;
 
@@ -2086,12 +2090,21 @@ fn resolve_program(program: &str) -> Result<ResolvedProgram, String> {
 
     let path = Path::new(program);
     let has_separator = program.contains('\\') || program.contains('/');
+    let extensions = supported_extensions();
 
     if has_separator || path.is_absolute() {
         return resolve_with_extensions(path);
     }
 
-    let extensions = supported_extensions();
+    let working_directory = working_directory.trim();
+        // Support pasted quoted working directories like "C:\\path with spaces".
+    let working_directory = working_directory.trim_matches('"');
+    if !working_directory.is_empty() {
+        let working_directory = Path::new(working_directory);
+        if let Some(resolved) = resolve_in_dir(&working_directory, program, &extensions) {
+            return Ok(resolved);
+        }
+    }
 
     let path_env = env::var_os("PATH").unwrap_or_default();
     for dir in env::split_paths(&path_env) {
@@ -2101,7 +2114,7 @@ fn resolve_program(program: &str) -> Result<ResolvedProgram, String> {
     }
 
     Err(format!(
-        "Program not found or not executable: {} (expected .exe/.com/.cmd/.bat on PATH)",
+        "Program not found or not executable: {} (expected .exe/.com/.cmd/.bat on working directory or PATH)",
         program
     ))
 }
