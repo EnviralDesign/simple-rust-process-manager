@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Align2, Button, CentralPanel, Color32, Context, CornerRadius, FontId, Key, Layout,
-    Pos2, RichText, ScrollArea, SidePanel, Stroke, TextEdit, TopBottomPanel, Ui, UiBuilder, Vec2,
-    ViewportBuilder, ViewportCommand, Window,
+    Pos2, RectAlign, RichText, ScrollArea, SidePanel, Stroke, TextEdit, TopBottomPanel, Ui,
+    UiBuilder, Vec2, ViewportBuilder, ViewportCommand, Window,
 };
 #[cfg(windows)]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -57,7 +57,7 @@ const ACCENT_SOFT: Color32 = Color32::from_rgb(86, 102, 126);
 const SIDEBAR_WIDTH: f32 = 240.0;
 const SIDEBAR_MIN_WIDTH: f32 = 180.0;
 const SIDEBAR_MAX_WIDTH: f32 = 460.0;
-const PROCESS_LABEL_HOVER_DELAY_SECONDS: f64 = 2.0;
+const PROCESS_LABEL_HOVER_DELAY_SECONDS: f64 = 0.75;
 const UI_LOG_LIMIT: usize = 1000;
 const WINDOW_CORNER_RADIUS: u8 = 8;
 const CONTENT_GUTTER_X: i8 = 16;
@@ -708,6 +708,8 @@ impl ProcessManagerApp {
         ui: &mut Ui,
         response: &egui::Response,
         process: &ProcessConfig,
+        status: &ProcessStatus,
+        resource_usage: Option<ProcessResourceUsage>,
     ) {
         if response.hovered() {
             let now = Instant::now();
@@ -733,16 +735,25 @@ impl ProcessManagerApp {
 
             if elapsed >= delay {
                 let label = process_tab_label(process);
-                egui::Tooltip::always_open(
+                let details = resource_usage_text(resource_usage, status)
+                    .map(|metrics| format!("{} | {}", status, metrics))
+                    .unwrap_or_else(|| status.to_string());
+                let mut tooltip = egui::Tooltip::always_open(
                     ui.ctx().clone(),
                     ui.layer_id(),
                     response.id.with("full_process_label"),
-                    egui::PopupAnchor::Pointer,
-                )
-                .gap(12.0)
-                .show(|ui| {
+                    egui::PopupAnchor::from(response),
+                );
+                tooltip.popup = tooltip
+                    .popup
+                    .align(RectAlign::RIGHT_START)
+                    .gap(10.0)
+                    .width(360.0);
+                tooltip.show(|ui| {
                     ui.set_max_width(360.0);
-                    ui.label(RichText::new(label).color(TEXT_MAIN).size(13.0));
+                    ui.label(RichText::new(label).color(TEXT_MAIN).size(13.0).strong());
+                    ui.add_space(3.0);
+                    ui.label(RichText::new(details).color(TEXT_MUTED).size(11.5));
                 });
             } else {
                 ui.ctx().request_repaint_after(delay - elapsed);
@@ -1882,6 +1893,8 @@ impl ProcessManagerApp {
                                         ui,
                                         &row_response,
                                         &row_process,
+                                        &status,
+                                        resource_usage,
                                     );
                                     let row_clicked = row_response.clicked();
                                     if row_response.drag_started() {
