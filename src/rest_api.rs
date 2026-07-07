@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -15,7 +16,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch};
 
-use crate::config::{AppConfig, RemoteControlConfig};
+use crate::config::{AppConfig, ProcessGroupConfig, RemoteControlConfig};
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessRuntimeSnapshot};
 
 pub const REST_HOST: &str = "127.0.0.1";
@@ -166,6 +167,11 @@ impl RestServerController {
         };
         let router = Router::new()
             .route("/health", get(health))
+            .route("/groups", get(list_groups))
+            .route("/groups/{id}", get(get_group))
+            .route("/groups/{id}/start", post(start_group))
+            .route("/groups/{id}/stop", post(stop_group))
+            .route("/groups/{id}/restart", post(restart_group))
             .route("/processes", get(list_processes))
             .route("/processes/{id}", get(get_process))
             .route("/processes/{id}/logs", get(get_process_logs))
@@ -316,6 +322,19 @@ struct ProcessLogsResponse {
     lines: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct GroupRuntimeSnapshot {
+    id: String,
+    name: String,
+    expanded: bool,
+    process_ids: Vec<String>,
+    process_count: usize,
+    status: String,
+    process_counts: ProcessCounts,
+    cpu_percent: Option<f32>,
+    memory_bytes: Option<u64>,
+}
+
 async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         ok: true,
@@ -384,6 +403,74 @@ async fn get_process_logs(
         }),
     )
         .into_response()
+}
+
+async fn list_groups(State(state): State<ApiState>) -> impl IntoResponse {
+    let config = match AppConfig::load_from_disk() {
+        Ok(mut config) => {
+            config.normalize();
+            config
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    ok: false,
+                    message: format!("Failed to read process groups: {}", err),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let processes = state.manager.list_processes();
+    let snapshots = group_snapshots(&config.groups, &processes);
+    (StatusCode::OK, Json(snapshots)).into_response()
+}
+
+async fn get_group(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    let config = match AppConfig::load_from_disk() {
+        Ok(mut config) => {
+            config.normalize();
+            config
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    ok: false,
+                    message: format!("Failed to read process groups: {}", err),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(group) = config.get_group(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                message: format!("Unknown group id '{}'", id),
+            }),
+        )
+            .into_response();
+    };
+
+    let processes = state.manager.list_processes();
+    (StatusCode::OK, Json(group_snapshot(group, &processes))).into_response()
+}
+
+async fn start_group(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    group_action(&state.manager, id, "start")
+}
+
+async fn stop_group(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    group_action(&state.manager, id, "stop")
+}
+
+async fn restart_group(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
+    group_action(&state.manager, id, "restart")
 }
 
 async fn start_stack(State(state): State<ApiState>) -> Json<AckResponse> {
@@ -542,6 +629,16 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
             },
             EndpointDoc {
                 method: "GET",
+                path: "/groups",
+                description: "Returns configured process groups with member ids, aggregate status, CPU percent, and RAM bytes.",
+            },
+            EndpointDoc {
+                method: "GET",
+                path: "/groups/{id}",
+                description: "Returns one process group by stable id with aggregate status, CPU percent, and RAM bytes.",
+            },
+            EndpointDoc {
+                method: "GET",
                 path: "/processes/{id}",
                 description: "Returns one managed process by stable id, including PID, CPU percent, and RAM bytes.",
             },
@@ -580,6 +677,21 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
             },
             EndpointDoc {
                 method: "POST",
+                path: "/groups/{id}/start",
+                description: "Starts every process in one configured group.",
+            },
+            EndpointDoc {
+                method: "POST",
+                path: "/groups/{id}/stop",
+                description: "Stops every process in one configured group.",
+            },
+            EndpointDoc {
+                method: "POST",
+                path: "/groups/{id}/restart",
+                description: "Restarts every process in one configured group.",
+            },
+            EndpointDoc {
+                method: "POST",
                 path: "/processes/{id}/start",
                 description: "Starts a single managed process or container.",
             },
@@ -601,8 +713,9 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
         ],
         usage_notes: vec![
             "Control endpoints are fire-and-poll. After a POST, poll GET /processes.",
-            "Always target individual components by stable id, not display name.",
+            "Always target individual components and groups by stable id, not display name.",
             "Fetch recent output with GET /processes/{id}/logs?limit=N when an agent needs tail logs.",
+            "Group membership lives in processes.json. To regroup entries, edit the groups array and then call POST /stack/reload.",
             "This server binds only to 127.0.0.1 and is reachable only from the same machine.",
             "POST /stack/reload stops all managed processes first, regardless of status or stack-control settings.",
             "POST /processes/{id}/reload only refreshes config for one process.",
@@ -644,6 +757,166 @@ fn process_action(
         }),
     )
         .into_response()
+}
+
+fn group_action(
+    manager: &Arc<ProcessManager>,
+    id: String,
+    action: &'static str,
+) -> axum::response::Response {
+    let config = match AppConfig::load_from_disk() {
+        Ok(mut config) => {
+            config.normalize();
+            config
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    ok: false,
+                    message: format!("Failed to read process groups: {}", err),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(group) = config.get_group(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                ok: false,
+                message: format!("Unknown group id '{}'", id),
+            }),
+        )
+            .into_response();
+    };
+
+    let process_ids = group.process_ids.clone();
+    let group_name = group.name.clone();
+
+    match action {
+        "start" => {
+            for process_id in &process_ids {
+                manager.start_process(process_id);
+            }
+        }
+        "stop" => {
+            for process_id in &process_ids {
+                manager.stop_process(process_id);
+            }
+        }
+        "restart" => {
+            for process_id in &process_ids {
+                manager.restart_process(process_id);
+            }
+        }
+        _ => {}
+    }
+
+    (
+        StatusCode::OK,
+        Json(AckResponse {
+            ok: true,
+            scope: "group",
+            action,
+            target_id: Some(id),
+            message: format!(
+                "{} requested for group '{}' ({} process(es))",
+                capitalize(action),
+                group_name,
+                process_ids.len()
+            ),
+        }),
+    )
+        .into_response()
+}
+
+fn group_snapshots(
+    groups: &[ProcessGroupConfig],
+    processes: &[ProcessRuntimeSnapshot],
+) -> Vec<GroupRuntimeSnapshot> {
+    let process_by_id: HashMap<&str, &ProcessRuntimeSnapshot> = processes
+        .iter()
+        .map(|process| (process.id.as_str(), process))
+        .collect();
+
+    groups
+        .iter()
+        .map(|group| group_snapshot_from_map(group, &process_by_id))
+        .collect()
+}
+
+fn group_snapshot(
+    group: &ProcessGroupConfig,
+    processes: &[ProcessRuntimeSnapshot],
+) -> GroupRuntimeSnapshot {
+    let process_by_id: HashMap<&str, &ProcessRuntimeSnapshot> = processes
+        .iter()
+        .map(|process| (process.id.as_str(), process))
+        .collect();
+    group_snapshot_from_map(group, &process_by_id)
+}
+
+fn group_snapshot_from_map(
+    group: &ProcessGroupConfig,
+    process_by_id: &HashMap<&str, &ProcessRuntimeSnapshot>,
+) -> GroupRuntimeSnapshot {
+    let mut counts = ProcessCounts {
+        total: group.process_ids.len(),
+        ..ProcessCounts::default()
+    };
+    let mut cpu_total = 0.0f32;
+    let mut has_cpu = false;
+    let mut memory_total = 0u64;
+    let mut has_memory = false;
+
+    for process_id in &group.process_ids {
+        match process_by_id.get(process_id.as_str()) {
+            Some(process) => {
+                match process.status.as_str() {
+                    "Running" => counts.running += 1,
+                    "Starting" => counts.starting += 1,
+                    "Stopping" => counts.stopping += 1,
+                    status if status.starts_with("Error") => counts.error += 1,
+                    _ => counts.stopped += 1,
+                }
+                if let Some(cpu_percent) = process.cpu_percent {
+                    cpu_total += cpu_percent;
+                    has_cpu = true;
+                }
+                if let Some(memory_bytes) = process.memory_bytes {
+                    memory_total = memory_total.saturating_add(memory_bytes);
+                    has_memory = true;
+                }
+            }
+            None => counts.stopped += 1,
+        }
+    }
+
+    let status = if counts.error > 0 {
+        format!("Error: {} member(s)", counts.error)
+    } else if counts.stopping > 0 {
+        "Stopping".to_string()
+    } else if counts.starting > 0 {
+        "Starting".to_string()
+    } else if counts.running > 0 {
+        "Running".to_string()
+    } else {
+        "Stopped".to_string()
+    };
+
+    GroupRuntimeSnapshot {
+        id: group.id.clone(),
+        name: group.name.clone(),
+        expanded: group.expanded,
+        process_ids: group.process_ids.clone(),
+        process_count: group.process_ids.len(),
+        status,
+        process_counts: counts,
+        cpu_percent: has_cpu.then_some(cpu_total),
+        memory_bytes: has_memory.then_some(memory_total),
+    }
 }
 
 fn stack_ack(action: &'static str) -> AckResponse {
@@ -698,6 +971,7 @@ pub fn build_agent_bootstrap(
     remote_control: &RemoteControlConfig,
     snapshot: &RestServerSnapshot,
     processes: &[ProcessRuntimeSnapshot],
+    groups: &[ProcessGroupConfig],
 ) -> String {
     let mut lines = vec![
         "Local Process Manager Skill".to_string(),
@@ -711,21 +985,27 @@ pub fn build_agent_bootstrap(
         "Usage".to_string(),
         "1. Call GET /health to confirm the server is reachable.".to_string(),
         "2. Call GET /processes to discover process ids, current statuses, PID, CPU percent, and RAM bytes.".to_string(),
-        "3. Call GET /processes/{id}/logs?limit=200 to fetch the latest log tail for a component."
+        "3. Call GET /groups to discover group ids, member process ids, aggregate status, CPU percent, and RAM bytes.".to_string(),
+        "4. Call GET /processes/{id}/logs?limit=200 to fetch the latest log tail for a component."
             .to_string(),
-        "4. Use POST /stack/reload to reread processes.json from disk. This stops all managed processes first, regardless of status or stack-control settings.".to_string(),
-        "5. Use POST /processes/{id}/reload to reread one process from processes.json."
+        "5. Use POST /stack/reload to reread processes.json from disk. This stops all managed processes first, regardless of status or stack-control settings.".to_string(),
+        "6. To regroup entries, edit the groups array in processes.json next to the Process Manager executable, then call POST /stack/reload.".to_string(),
+        "7. Use POST /processes/{id}/reload to reread one process from processes.json."
             .to_string(),
-        "6. Use POST /stack/start, /stack/stop, or /stack/restart for entries that opt into each stack control."
+        "8. Use POST /stack/start, /stack/stop, or /stack/restart for entries that opt into each stack control."
             .to_string(),
-        "7. Use POST /processes/{id}/start, /stop, or /restart for a single component."
+        "9. Use POST /groups/{id}/start, /stop, or /restart for every member of one group."
             .to_string(),
-        "8. After any POST, poll GET /processes until the desired state is visible."
+        "10. Use POST /processes/{id}/start, /stop, or /restart for a single component."
+            .to_string(),
+        "11. After any POST, poll GET /processes or GET /groups until the desired state is visible."
             .to_string(),
         String::new(),
         "Endpoint Topology".to_string(),
         "- GET /health".to_string(),
         "- GET /processes".to_string(),
+        "- GET /groups".to_string(),
+        "- GET /groups/{id}".to_string(),
         "- GET /processes/{id}".to_string(),
         "- GET /processes/{id}/logs?limit=N".to_string(),
         "- GET /topology".to_string(),
@@ -733,13 +1013,36 @@ pub fn build_agent_bootstrap(
         "- POST /stack/stop".to_string(),
         "- POST /stack/restart".to_string(),
         "- POST /stack/reload".to_string(),
+        "- POST /groups/{id}/start".to_string(),
+        "- POST /groups/{id}/stop".to_string(),
+        "- POST /groups/{id}/restart".to_string(),
         "- POST /processes/{id}/start".to_string(),
         "- POST /processes/{id}/stop".to_string(),
         "- POST /processes/{id}/restart".to_string(),
         "- POST /processes/{id}/reload".to_string(),
         String::new(),
-        "Known Processes".to_string(),
+        "Known Groups".to_string(),
     ];
+
+    if groups.is_empty() {
+        lines.push("- No process groups are configured yet.".to_string());
+    } else {
+        let group_snapshots = group_snapshots(groups, processes);
+        for group in group_snapshots {
+            lines.push(format!(
+                "- {} | id={} | status={} | members={} | member_ids={} | cpu={} | ram_bytes={}",
+                group.name,
+                group.id,
+                group.status,
+                group.process_count,
+                group.process_ids.join(","),
+                format_optional_cpu(group.cpu_percent),
+                format_optional_bytes(group.memory_bytes)
+            ));
+        }
+    }
+
+    lines.extend([String::new(), "Known Processes".to_string()]);
 
     if processes.is_empty() {
         lines.push("- No managed processes are configured yet.".to_string());
@@ -781,6 +1084,14 @@ pub fn build_agent_bootstrap(
     } else {
         lines.push(
             "Note: target individual components by stable id rather than by display name."
+                .to_string(),
+        );
+        lines.push(
+            "Note: target groups by stable group id; call GET /groups when you need the current group list."
+                .to_string(),
+        );
+        lines.push(
+            "Note: regroup by editing the groups array in processes.json, then call POST /stack/reload."
                 .to_string(),
         );
         lines.push(

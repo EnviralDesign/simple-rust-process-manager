@@ -19,6 +19,7 @@ It is built for the annoying real-world cases:
 - Auto-start only the processes you opt into when the manager itself launches.
 - Restart unstable services automatically with per-process managed restart and optional active hours.
 - Start dormant services from simple per-process schedules.
+- Organize related processes into one-layer groups with expand/collapse and aggregate CPU/RAM.
 - Stop process trees cleanly on Windows, including messy child-process chains.
 - Mix normal commands and Docker containers in the same stack.
 - Expose an optional localhost-only REST API for tooling and AI agents.
@@ -36,6 +37,7 @@ Highlights visible here:
 - `(M)` marks entries with managed restart enabled
 - `(A)` marks entries that auto-start when the app launches
 - `Start All`, `Stop All`, and `Restart All` control entries that opt into each global action
+- Shift-select process rows to build one-layer groups; group rows expand/collapse and show aggregate CPU/RAM
 - drag any process in the sidebar to reorder it; a live insertion line previews where the row will land when dropped, or use right-click move actions
 - the selected process shows live output with warning/error color differentiation
 - the header can expose a loopback API and copy an agent bootstrap payload
@@ -90,6 +92,12 @@ This panel controls:
 - Keep one-off/manual entries independent by disabling their Start All, Stop All, and Restart All participation.
 - Keep a mixed stack of regular commands and Docker containers in one place.
 
+### Groups
+
+- Expand and collapse group rows to keep long stacks readable.
+- See aggregate CPU/RAM for each group row at a glance.
+- Start, stop, or restart a group through the UI or the REST API.
+
 ### Live Logs
 
 - Stream output for the selected process in real time.
@@ -112,6 +120,7 @@ This panel controls:
 
 - Store config in a portable `processes.json` next to the executable.
 - Edit existing entries in place.
+- Edit one-layer groups in the top-level `groups` array alongside `processes`.
 - Persist logs to disk per process, with configurable retention.
 - Migrate older config files forward automatically.
 
@@ -120,6 +129,7 @@ This panel controls:
 - Enable a localhost-only REST API for scripts, dashboards, and agents.
 - Copy an agent bootstrap block that includes host, port, endpoints, and process ids.
 - Use stable process ids for reliable external control.
+- Edit the `groups` array in `processes.json` and call `POST /stack/reload` to apply changes.
 
 ## Quick Start
 
@@ -184,6 +194,14 @@ Example:
     "port": 47821
   },
   "log_directory": ".",
+  "groups": [
+    {
+      "id": "uuid-here",
+      "name": "Frontend",
+      "process_ids": ["uuid-here", "uuid-here"],
+      "expanded": true
+    }
+  ],
   "processes": [
     {
       "id": "uuid-here",
@@ -195,16 +213,9 @@ Example:
       "startup_delay_seconds": 0,
       "auto_restart": true,
       "restart_schedule": {
-        "enabled": false,
-        "stop_when_inactive": false,
-        "hours": []
-      },
-      "scheduled_run": {
-        "enabled": false,
-        "mode": "Daily",
-        "hour": 9,
-        "interval_hours": 1,
-        "weekdays": [true, true, true, true, true, false, false]
+        "enabled": true,
+        "stop_when_inactive": true,
+        "active_hours": [57, 58, 59, 60, 61, 62, 63, 64]
       },
       "respond_to_start_all": true,
       "respond_to_stop_all": true,
@@ -221,18 +232,6 @@ Example:
       "auto_start": false,
       "startup_delay_seconds": 0,
       "auto_restart": false,
-      "restart_schedule": {
-        "enabled": false,
-        "stop_when_inactive": false,
-        "hours": []
-      },
-      "scheduled_run": {
-        "enabled": false,
-        "mode": "Daily",
-        "hour": 9,
-        "interval_hours": 1,
-        "weekdays": [true, true, true, true, true, false, false]
-      },
       "respond_to_start_all": true,
       "respond_to_stop_all": true,
       "respond_to_restart_all": true,
@@ -247,8 +246,10 @@ Notes:
 
 - `log_directory` is the shared base folder for persisted logs
 - `.` resolves next to the executable
-- `restart_schedule.hours` is a 168-entry Monday 00:00 through Sunday 23:00 hourly grid; missing or short lists are normalized automatically
-- `scheduled_run` only starts entries that are not already running
+- `groups` is a one-layer list of process ids with an `expanded` UI state
+- disabled `restart_schedule` and `scheduled_run` blocks are omitted on save; omitted or `null` schedule blocks load as disabled
+- `restart_schedule.active_hours` is a sparse list of hourly indices, Monday 00:00 through Sunday 23:00; legacy `restart_schedule.hours` boolean grids still load and compact on save
+- `scheduled_run` only starts entries that are not already running; default fields are omitted when possible
 - `startup_delay_seconds` waits before honoring any start request for that entry and defaults to `0`
 - `respond_to_start_all`, `respond_to_stop_all`, and `respond_to_restart_all` default to `true` for older configs
 - older config versions are migrated automatically on startup
@@ -260,6 +261,8 @@ When enabled, the manager starts a loopback-only HTTP server on `127.0.0.1:{port
 Read endpoints:
 
 - `GET /health`
+- `GET /groups`
+- `GET /groups/{id}`
 - `GET /processes`
 - `GET /processes/{id}`
 - `GET /processes/{id}/logs?limit=N`
@@ -271,6 +274,9 @@ Control endpoints:
 - `POST /stack/stop`
 - `POST /stack/restart`
 - `POST /stack/reload` (reloads `processes.json` from disk and reinitializes the managed set)
+- `POST /groups/{id}/start`
+- `POST /groups/{id}/stop`
+- `POST /groups/{id}/restart`
 - `POST /processes/{id}/reload` (reloads one managed process from `processes.json` without stopping others)
 - `POST /processes/{id}/start`
 - `POST /processes/{id}/stop`
@@ -280,8 +286,10 @@ Notes:
 
 - the API binds only to `127.0.0.1`
 - use process `id`, not display name, for per-process actions
+- use group `id`, not group name, for per-group actions
 - `GET /processes/{id}/logs?limit=N` defaults to `200` and caps at `1000`
 - `POST /stack/reload` always stops all managed processes before reload, regardless of their individual `respond_to_*` stack-control flags.
+- after editing the `groups` array in `processes.json`, call `POST /stack/reload` to apply the new group layout
 - control calls are fire-and-poll; poll `GET /processes` or `GET /health` for updated state
 
 ## Keyboard Shortcuts

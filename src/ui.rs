@@ -1,6 +1,6 @@
 //! Native desktop shell built with egui/eframe.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ use tokio::runtime::Runtime;
 
 use crate::config::{
     weekly_hour_enabled, weekly_hour_index, AppConfig, ManagedRestartSchedule, ProcessConfig,
-    ProcessType, ScheduledRun, ScheduledRunMode, DEFAULT_LOG_ROTATION_COUNT,
+    ProcessGroupConfig, ProcessType, ScheduledRun, ScheduledRunMode, DEFAULT_LOG_ROTATION_COUNT,
     DEFAULT_STARTUP_DELAY_SECONDS, WEEKLY_HOUR_COUNT,
 };
 use crate::log_classification::contains_error_indicator;
@@ -428,6 +428,37 @@ impl ProcessDialog {
 }
 
 #[derive(Clone)]
+struct GroupDraft {
+    name: String,
+}
+
+impl GroupDraft {
+    fn from_group(group: &ProcessGroupConfig) -> Self {
+        Self {
+            name: group.name.clone(),
+        }
+    }
+}
+
+enum GroupDialog {
+    Edit { id: String, form: GroupDraft },
+}
+
+impl GroupDialog {
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Edit { .. } => "Edit Group",
+        }
+    }
+
+    fn form_mut(&mut self) -> &mut GroupDraft {
+        match self {
+            Self::Edit { form, .. } => form,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct RestSettingsForm {
     enabled: bool,
     port: String,
@@ -486,6 +517,48 @@ struct FrozenLogLine {
     index: usize,
 }
 
+#[derive(Clone, Debug)]
+struct GroupRuntimeSummary {
+    counts: ProcessCounts,
+    status: ProcessStatus,
+    resource_usage: ProcessResourceUsage,
+}
+
+#[derive(Clone, Debug)]
+enum SidebarRenderItem {
+    Group(ProcessGroupConfig),
+    Process {
+        process: ProcessConfig,
+        group_id: Option<String>,
+        last_in_group: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarDragItem {
+    Process(String),
+    Group(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarDropTarget {
+    TopLevel {
+        before_process_id: Option<String>,
+    },
+    InGroup {
+        group_id: String,
+        before_process_id: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct SidebarDropSlot {
+    y: f32,
+    left: f32,
+    right: f32,
+    target: SidebarDropTarget,
+}
+
 pub struct ProcessManagerApp {
     toggles: RuntimeToggles,
     runtime: Runtime,
@@ -493,8 +566,12 @@ pub struct ProcessManagerApp {
     rest_controller: Arc<RestServerController>,
     config: AppConfig,
     selected_process: Option<String>,
-    dragged_process: Option<String>,
+    selected_group: Option<String>,
+    selected_processes: Vec<String>,
+    selection_anchor_process: Option<String>,
+    dragged_sidebar_item: Option<SidebarDragItem>,
     process_dialog: Option<ProcessDialog>,
+    group_dialog: Option<GroupDialog>,
     delete_process_id: Option<String>,
     reload_processes_confirm_open: bool,
     rest_settings_open: bool,
@@ -585,8 +662,12 @@ impl ProcessManagerApp {
             rest_controller,
             config,
             selected_process: selected_process.clone(),
-            dragged_process: None,
+            selected_group: None,
+            selected_processes: selected_process.iter().cloned().collect(),
+            selection_anchor_process: selected_process.clone(),
+            dragged_sidebar_item: None,
             process_dialog: None,
+            group_dialog: None,
             delete_process_id: None,
             reload_processes_confirm_open: false,
             rest_settings_open: false,
@@ -787,17 +868,63 @@ impl ProcessManagerApp {
     }
 
     fn ensure_valid_selection(&mut self) {
-        let selected_exists = self
+        let valid_process_ids: HashSet<String> = self
+            .config
+            .processes
+            .iter()
+            .map(|process| process.id.clone())
+            .collect();
+
+        if self
+            .selected_group
+            .as_ref()
+            .is_some_and(|id| self.config.get_group(id).is_none())
+        {
+            self.selected_group = None;
+        }
+
+        self.selected_processes
+            .retain(|process_id| valid_process_ids.contains(process_id));
+
+        if self
             .selected_process
             .as_ref()
-            .and_then(|id| self.config.get_process(id))
-            .is_some();
-        if !selected_exists {
-            self.selected_process = self
-                .config
-                .processes
-                .first()
-                .map(|process| process.id.clone());
+            .is_some_and(|process_id| !valid_process_ids.contains(process_id))
+        {
+            self.selected_process = None;
+        }
+
+        if self
+            .selection_anchor_process
+            .as_ref()
+            .is_some_and(|process_id| !valid_process_ids.contains(process_id))
+        {
+            self.selection_anchor_process = self.selected_processes.first().cloned();
+        }
+
+        if self.selected_group.is_some() {
+            self.selected_process = None;
+            self.selected_processes.clear();
+            return;
+        }
+
+        if self.selected_processes.len() > 1 {
+            self.selected_process = None;
+            return;
+        }
+
+        if let Some(process_id) = self.selected_process.clone() {
+            self.selected_processes = vec![process_id];
+            return;
+        }
+
+        if let Some(process_id) = self.selected_processes.first().cloned() {
+            self.selected_process = Some(process_id);
+            return;
+        }
+
+        if let Some(first_process) = self.config.processes.first() {
+            self.select_single_process(first_process.id.clone());
         }
     }
 
@@ -828,6 +955,15 @@ impl ProcessManagerApp {
         }
     }
 
+    fn open_edit_group(&mut self, group_id: &str) {
+        if let Some(group) = self.config.get_group(group_id) {
+            self.group_dialog = Some(GroupDialog::Edit {
+                id: group.id.clone(),
+                form: GroupDraft::from_group(group),
+            });
+        }
+    }
+
     fn open_rest_settings(&mut self) {
         self.stack_name_buffer = self.config.stack_name.clone();
         self.rest_settings_form = RestSettingsForm::from_config(&self.config);
@@ -837,6 +973,83 @@ impl ProcessManagerApp {
 
     fn request_processes_reload(&mut self) {
         self.reload_processes_confirm_open = true;
+    }
+
+    fn select_single_process(&mut self, process_id: String) {
+        self.selected_process = Some(process_id.clone());
+        self.selected_group = None;
+        self.selected_processes = vec![process_id.clone()];
+        self.selection_anchor_process = Some(process_id);
+    }
+
+    fn select_group(&mut self, group_id: String) {
+        self.selected_process = None;
+        self.selected_group = Some(group_id);
+        self.selected_processes.clear();
+        self.clear_log_selection();
+    }
+
+    fn select_process_from_sidebar(&mut self, process_id: String, extend_range: bool) {
+        if extend_range {
+            let anchor = self
+                .selection_anchor_process
+                .clone()
+                .or_else(|| self.selected_processes.first().cloned())
+                .or_else(|| self.selected_process.clone());
+
+            if let Some(anchor) = anchor {
+                let selected_ids = self.process_ids_between(&anchor, &process_id);
+                if selected_ids.len() > 1 {
+                    self.selected_process = None;
+                    self.selected_group = None;
+                    self.selected_processes = selected_ids;
+                    self.clear_log_selection();
+                    return;
+                }
+            }
+        }
+
+        self.select_single_process(process_id);
+    }
+
+    fn process_ids_between(&self, first_id: &str, second_id: &str) -> Vec<String> {
+        let Some(first_index) = self
+            .config
+            .processes
+            .iter()
+            .position(|process| process.id == first_id)
+        else {
+            return vec![second_id.to_string()];
+        };
+        let Some(second_index) = self
+            .config
+            .processes
+            .iter()
+            .position(|process| process.id == second_id)
+        else {
+            return vec![second_id.to_string()];
+        };
+
+        let (start, end) = if first_index <= second_index {
+            (first_index, second_index)
+        } else {
+            (second_index, first_index)
+        };
+
+        self.config.processes[start..=end]
+            .iter()
+            .map(|process| process.id.clone())
+            .collect()
+    }
+
+    fn is_process_selected(&self, process_id: &str) -> bool {
+        self.selected_processes
+            .iter()
+            .any(|selected_id| selected_id == process_id)
+    }
+
+    fn is_group_selected(&self, group_id: &str) -> bool {
+        self.selected_group.as_deref() == Some(group_id)
     }
 
     fn process_config(&self, process_id: &str) -> Option<ProcessConfig> {
@@ -924,6 +1137,7 @@ impl ProcessManagerApp {
             &self.config.remote_control,
             &self.rest_snapshot(),
             &self.manager.list_processes(),
+            &self.config.groups,
         );
 
         match copy_text_to_clipboard(&payload) {
@@ -986,7 +1200,7 @@ impl ProcessManagerApp {
                 self.manager.add_process(process.clone());
                 self.config.add_process(process.clone());
                 self.persist_config();
-                self.selected_process = Some(process.id);
+                self.select_single_process(process.id);
                 self.set_banner("Process added.");
             }
             ProcessDialog::Edit { id, form } => {
@@ -1050,8 +1264,29 @@ impl ProcessManagerApp {
                 self.config.update_process(&id, updated.clone());
                 self.persist_config();
                 let _ = self.manager.update_process_config(updated);
-                self.selected_process = Some(id);
+                self.select_single_process(id);
                 self.set_banner("Process updated.");
+            }
+        }
+    }
+
+    fn apply_group_dialog(&mut self, dialog: GroupDialog) {
+        match dialog {
+            GroupDialog::Edit { id, form } => {
+                let name = form.name.trim();
+                if name.is_empty() {
+                    self.set_banner("Group name is required.");
+                    return;
+                }
+
+                let Some(group) = self.config.groups.iter_mut().find(|group| group.id == id) else {
+                    self.set_banner("Group no longer exists.");
+                    return;
+                };
+
+                group.name = name.to_string();
+                self.persist_config();
+                self.set_banner("Group updated.");
             }
         }
     }
@@ -1102,6 +1337,8 @@ impl ProcessManagerApp {
         if self.selected_process.as_deref() == Some(process_id) {
             self.selected_process = None;
         }
+        self.selected_processes
+            .retain(|selected_id| selected_id != process_id);
         self.ensure_valid_selection();
         self.set_banner("Process deleted.");
     }
@@ -1120,37 +1357,101 @@ impl ProcessManagerApp {
         }
     }
 
-    fn move_process_to_index(&mut self, process_id: &str, target_index: usize) {
-        if self.config.move_process_to_index(process_id, target_index) {
+    fn apply_sidebar_drop(&mut self, dragged: SidebarDragItem, target: SidebarDropTarget) {
+        let changed = match (dragged, target) {
+            (
+                SidebarDragItem::Process(process_id),
+                SidebarDropTarget::TopLevel { before_process_id },
+            ) => self
+                .config
+                .move_process_to_top_level(&process_id, before_process_id.as_deref()),
+            (
+                SidebarDragItem::Process(process_id),
+                SidebarDropTarget::InGroup {
+                    group_id,
+                    before_process_id,
+                },
+            ) => self.config.move_process_into_group(
+                &process_id,
+                &group_id,
+                before_process_id.as_deref(),
+            ),
+            (
+                SidebarDragItem::Group(group_id),
+                SidebarDropTarget::TopLevel { before_process_id },
+            ) => self
+                .config
+                .move_group_to_top_level(&group_id, before_process_id.as_deref()),
+            (SidebarDragItem::Group(_), SidebarDropTarget::InGroup { .. }) => false,
+        };
+
+        if changed {
             self.persist_config();
-            self.set_banner("Process reordered.");
+            self.set_banner("Sidebar order updated.");
         }
     }
 
-    fn draw_drag_insert_marker(&self, ui: &mut Ui, row_bounds: &[egui::Rect], insert_index: usize) {
-        if row_bounds.is_empty() {
-            return;
+    fn valid_sidebar_drop_slot(&self, dragged: &SidebarDragItem, slot: &SidebarDropSlot) -> bool {
+        match (dragged, &slot.target) {
+            (
+                SidebarDragItem::Process(process_id),
+                SidebarDropTarget::TopLevel { before_process_id },
+            ) => {
+                before_process_id.as_deref() != Some(process_id.as_str())
+                    || self.config.group_for_process(process_id).is_some()
+            }
+            (
+                SidebarDragItem::Process(process_id),
+                SidebarDropTarget::InGroup {
+                    before_process_id, ..
+                },
+            ) => before_process_id.as_deref() != Some(process_id.as_str()),
+            (
+                SidebarDragItem::Group(group_id),
+                SidebarDropTarget::TopLevel { before_process_id },
+            ) => before_process_id.as_deref().map_or(true, |before_id| {
+                self.config.get_group(group_id).map_or(true, |group| {
+                    !group
+                        .process_ids
+                        .iter()
+                        .any(|process_id| process_id == before_id)
+                })
+            }),
+            (SidebarDragItem::Group(_), SidebarDropTarget::InGroup { .. }) => false,
         }
+    }
 
-        let marker_row = if insert_index >= row_bounds.len() {
-            row_bounds.len() - 1
-        } else {
-            insert_index
-        };
+    fn nearest_sidebar_drop_slot(
+        &self,
+        dragged: &SidebarDragItem,
+        slots: &[SidebarDropSlot],
+        pointer_pos: egui::Pos2,
+    ) -> Option<SidebarDropSlot> {
+        slots
+            .iter()
+            .filter(|slot| self.valid_sidebar_drop_slot(dragged, slot))
+            .min_by(|a, b| {
+                (a.y - pointer_pos.y)
+                    .abs()
+                    .partial_cmp(&(b.y - pointer_pos.y).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+    }
 
-        let marker_rect = row_bounds[marker_row];
-        let y = if insert_index >= row_bounds.len() {
-            marker_rect.max.y
-        } else {
-            marker_rect.min.y
-        };
-
-        let left = marker_rect.left() + 8.0;
-        let right = marker_rect.right() - 8.0;
-
+    fn draw_drag_insert_marker(&self, ui: &mut Ui, slot: &SidebarDropSlot) {
+        let color = Color32::from_rgba_premultiplied(
+            TAB_SELECTED_STROKE.r(),
+            TAB_SELECTED_STROKE.g(),
+            TAB_SELECTED_STROKE.b(),
+            180,
+        );
         ui.painter().line_segment(
-            [egui::pos2(left, y), egui::pos2(right, y)],
-            Stroke::new(2.0, TAB_SELECTED_STROKE),
+            [
+                egui::pos2(slot.left, slot.y),
+                egui::pos2(slot.right, slot.y),
+            ],
+            Stroke::new(1.5, color),
         );
     }
 
@@ -1158,6 +1459,218 @@ impl ProcessManagerApp {
         self.selected_process
             .as_ref()
             .and_then(|id| self.process_config(id))
+    }
+
+    fn selected_group_config(&self) -> Option<ProcessGroupConfig> {
+        self.selected_group
+            .as_ref()
+            .and_then(|id| self.config.get_group(id).cloned())
+    }
+
+    fn selected_process_configs(&self) -> Vec<ProcessConfig> {
+        self.selected_processes
+            .iter()
+            .filter_map(|process_id| self.process_config(process_id))
+            .collect()
+    }
+
+    fn sidebar_items(&self) -> Vec<SidebarRenderItem> {
+        let mut items = Vec::new();
+        let mut rendered_group_ids = HashSet::new();
+        let mut rendered_process_ids = HashSet::new();
+
+        for process in &self.config.processes {
+            if rendered_process_ids.contains(&process.id) {
+                continue;
+            }
+
+            if let Some(group) = self.config.group_for_process(&process.id) {
+                if rendered_group_ids.insert(group.id.clone()) {
+                    items.push(SidebarRenderItem::Group(group.clone()));
+                    for process_id in &group.process_ids {
+                        rendered_process_ids.insert(process_id.clone());
+                    }
+                    if group.expanded {
+                        for (member_index, process_id) in group.process_ids.iter().enumerate() {
+                            if let Some(process) = self.config.get_process(process_id) {
+                                items.push(SidebarRenderItem::Process {
+                                    process: process.clone(),
+                                    group_id: Some(group.id.clone()),
+                                    last_in_group: member_index + 1 == group.process_ids.len(),
+                                });
+                            }
+                        }
+                    }
+                }
+            } else {
+                rendered_process_ids.insert(process.id.clone());
+                items.push(SidebarRenderItem::Process {
+                    process: process.clone(),
+                    group_id: None,
+                    last_in_group: false,
+                });
+            }
+        }
+
+        items
+    }
+
+    fn process_index(&self, process_id: &str) -> Option<usize> {
+        self.config
+            .processes
+            .iter()
+            .position(|process| process.id == process_id)
+    }
+
+    fn group_members(&self, group: &ProcessGroupConfig) -> Vec<ProcessConfig> {
+        group
+            .process_ids
+            .iter()
+            .filter_map(|process_id| self.process_config(process_id))
+            .collect()
+    }
+
+    fn summarize_process_ids(&self, process_ids: &[String]) -> GroupRuntimeSummary {
+        let mut counts = ProcessCounts {
+            total: process_ids.len(),
+            ..ProcessCounts::default()
+        };
+
+        for process_id in process_ids {
+            let status = self
+                .runtime_snapshot
+                .statuses
+                .get(process_id)
+                .cloned()
+                .unwrap_or(ProcessStatus::Stopped);
+
+            match status {
+                ProcessStatus::Running => counts.running += 1,
+                ProcessStatus::Stopped => counts.stopped += 1,
+                ProcessStatus::Starting => counts.starting += 1,
+                ProcessStatus::Stopping => counts.stopping += 1,
+                ProcessStatus::Error(_) => counts.error += 1,
+            }
+        }
+
+        let status = if counts.error > 0 {
+            ProcessStatus::Error(format!("{} member(s) in error", counts.error))
+        } else if counts.stopping > 0 {
+            ProcessStatus::Stopping
+        } else if counts.starting > 0 {
+            ProcessStatus::Starting
+        } else if counts.running > 0 {
+            ProcessStatus::Running
+        } else {
+            ProcessStatus::Stopped
+        };
+
+        GroupRuntimeSummary {
+            counts,
+            status,
+            resource_usage: aggregate_resource_usage(
+                process_ids.iter().map(String::as_str),
+                &self.runtime_snapshot.resource_usage,
+            )
+            .unwrap_or_default(),
+        }
+    }
+
+    fn group_summary(&self, group: &ProcessGroupConfig) -> GroupRuntimeSummary {
+        self.summarize_process_ids(&group.process_ids)
+    }
+
+    fn stack_resource_usage(&self) -> Option<ProcessResourceUsage> {
+        aggregate_resource_usage(
+            self.config
+                .processes
+                .iter()
+                .map(|process| process.id.as_str()),
+            &self.runtime_snapshot.resource_usage,
+        )
+    }
+
+    fn start_process_ids(&self, process_ids: &[String]) {
+        for process_id in process_ids {
+            self.manager.start_process(process_id);
+        }
+    }
+
+    fn stop_process_ids(&self, process_ids: &[String]) {
+        for process_id in process_ids {
+            self.manager.stop_process(process_id);
+        }
+    }
+
+    fn restart_process_ids(&self, process_ids: &[String]) {
+        for process_id in process_ids {
+            self.manager.stop_process(process_id);
+        }
+        for process_id in process_ids {
+            wait_for_process_stop(&self.manager, process_id);
+        }
+        for process_id in process_ids {
+            self.manager.start_process(process_id);
+        }
+    }
+
+    fn group_selected_processes(&mut self) {
+        if self.selected_processes.len() < 2 {
+            self.set_banner("Select two or more processes to create a group.");
+            return;
+        }
+
+        let name = self.next_group_name();
+        let selected_processes = self.selected_processes.clone();
+        let Some(group) = self
+            .config
+            .create_group_from_processes(name, &selected_processes)
+        else {
+            self.set_banner("Select two or more valid processes to create a group.");
+            return;
+        };
+
+        self.persist_config();
+        self.select_group(group.id);
+        self.set_banner("Process group created.");
+    }
+
+    fn next_group_name(&self) -> String {
+        for index in 1.. {
+            let candidate = format!("Group {}", index);
+            if !self
+                .config
+                .groups
+                .iter()
+                .any(|group| group.name == candidate)
+            {
+                return candidate;
+            }
+        }
+
+        "Group".to_string()
+    }
+
+    fn toggle_group_expanded(&mut self, group_id: &str) {
+        let Some(group) = self.config.get_group(group_id) else {
+            return;
+        };
+        let expanded = !group.expanded;
+        if self.config.set_group_expanded(group_id, expanded) {
+            self.persist_config();
+        }
+    }
+
+    fn ungroup(&mut self, group_id: &str) {
+        let selected_group = self.selected_group.as_deref() == Some(group_id);
+        if self.config.remove_group(group_id) {
+            self.persist_config();
+            if selected_group {
+                self.selected_group = None;
+                self.ensure_valid_selection();
+            }
+            self.set_banner("Process group removed.");
+        }
     }
 
     fn refresh_runtime_snapshot(&mut self, force: bool) {
@@ -1654,21 +2167,54 @@ impl ProcessManagerApp {
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_height(28.0);
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                let summary = stack_summary(&counts, self.stack_resource_usage());
+                let status_text = if let Some(message) = self.visible_banner() {
+                    format!("{summary} | {message}")
+                } else {
+                    summary
+                };
 
-                    ui.label(
-                        RichText::new(stack_summary(&counts))
-                            .color(TEXT_MUTED)
-                            .size(11.0),
-                    );
-                    if let Some(message) = self.visible_banner() {
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(message).color(TEXT_SOFT).size(11.0));
-                    }
+                let row_width = ui.available_width();
+                let (row_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(row_width, 28.0), egui::Sense::hover());
+                let controls_gap = 12.0;
+                let controls_width = row_width.min(if row_width < 720.0 { 430.0 } else { 500.0 });
+                let controls_left = (row_rect.right() - controls_width).max(row_rect.left());
+                let controls_rect = egui::Rect::from_min_max(
+                    Pos2::new(controls_left, row_rect.top()),
+                    row_rect.max,
+                );
+                let status_right = (controls_rect.left() - controls_gap).max(row_rect.left());
+                let status_rect = egui::Rect::from_min_max(
+                    row_rect.min,
+                    Pos2::new(status_right, row_rect.bottom()),
+                );
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if status_rect.width() > 1.0 {
+                    let _ = ui
+                        .interact(
+                            status_rect,
+                            ui.id().with("header_status_summary"),
+                            egui::Sense::hover(),
+                        )
+                        .on_hover_text(status_text.as_str());
+                    ui.painter()
+                        .with_clip_rect(status_rect.intersect(ui.clip_rect()))
+                        .text(
+                            Pos2::new(status_rect.left(), status_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            status_text.as_str(),
+                            FontId::proportional(11.0),
+                            TEXT_MUTED,
+                        );
+                }
+
+                ui.scope_builder(
+                    UiBuilder::new()
+                        .max_rect(controls_rect)
+                        .layout(Layout::right_to_left(Align::Center)),
+                    |ui| {
+                        ui.set_clip_rect(controls_rect.intersect(ui.clip_rect()));
                         ui.spacing_mut().item_spacing.x = 4.0;
 
                         // Group 1: Global process controls
@@ -1738,45 +2284,49 @@ impl ProcessManagerApp {
                         // Group 2: Utilities
                         if chrome_text_button(
                             ui,
-                            "📋 Copy Agent Skill",
+                            "📋 Agent Skill",
                             TOOLBAR_TEXT,
                             Vec2::new(0.0, 28.0),
                             12.0,
                             false,
                         )
+                        .on_hover_text("Copy the agent skill to clipboard.")
                         .clicked()
                         {
                             self.copy_agent_skill();
                         }
 
-                        let api_text = format!(
-                            "API: {}",
-                            if self.config.remote_control.enabled {
-                                "ON"
-                            } else {
-                                "OFF"
-                            }
-                        );
                         let api_color = if self.config.remote_control.enabled {
                             TOOLBAR_GREEN
                         } else {
                             TOOLBAR_GRAY
                         };
+                        let api_hover = if self.config.remote_control.enabled {
+                            format!(
+                                "Disable the Local API on 127.0.0.1:{}.",
+                                self.config.remote_control.port
+                            )
+                        } else {
+                            format!(
+                                "Enable the Local API on 127.0.0.1:{}.",
+                                self.config.remote_control.port
+                            )
+                        };
                         if chrome_text_button(
                             ui,
-                            &api_text,
+                            "API",
                             api_color,
                             Vec2::new(0.0, 28.0),
                             12.0,
                             false,
                         )
-                        .on_hover_text("Toggle Local API")
+                        .on_hover_text(api_hover)
                         .clicked()
                         {
                             self.toggle_api_enabled();
                         }
-                    });
-                });
+                    },
+                );
             });
     }
 
@@ -1856,125 +2406,267 @@ impl ProcessManagerApp {
                                 let mut move_up_id: Option<String> = None;
                                 let mut move_down_id: Option<String> = None;
                                 let mut reload_process_id: Option<String> = None;
-                                let mut reorder_to: Option<(String, usize)> = None;
-                                let mut drag_insert_index: Option<usize> = None;
-                                let mut row_bounds: Vec<egui::Rect> =
-                                    Vec::with_capacity(process_count);
+                                let mut toggle_group_id: Option<String> = None;
+                                let mut ungroup_id: Option<String> = None;
+                                let mut group_selected_from_menu = false;
+                                let mut drop_slots: Vec<SidebarDropSlot> = Vec::new();
+                                let mut last_row_rect: Option<egui::Rect> = None;
 
-                                for (index, process) in
-                                    self.config.processes.clone().into_iter().enumerate()
-                                {
-                                    let row_process =
-                                        self.process_config(&process.id).unwrap_or(process.clone());
-                                    let status = self
-                                        .runtime_snapshot
-                                        .statuses
-                                        .get(&row_process.id)
-                                        .cloned()
-                                        .unwrap_or(ProcessStatus::Stopped);
-                                    let resource_usage = self
-                                        .runtime_snapshot
-                                        .resource_usage
-                                        .get(&row_process.id)
-                                        .copied();
-                                    let is_selected = self.selected_process.as_deref()
-                                        == Some(process.id.as_str());
-                                    let flash_intensity =
-                                        self.process_row_flash_intensity(ctx, &row_process.id);
-                                    let row_response = draw_process_row(
-                                        ui,
-                                        &row_process,
-                                        &status,
-                                        resource_usage,
-                                        is_selected,
-                                        flash_intensity,
-                                    );
-                                    self.update_process_label_hover(
-                                        ui,
-                                        &row_response,
-                                        &row_process,
-                                        &status,
-                                        resource_usage,
-                                    );
-                                    let row_clicked = row_response.clicked();
-                                    if row_response.drag_started() {
-                                        self.dragged_process = Some(process.id.clone());
-                                        self.selected_process = Some(process.id.clone());
-                                        self.refresh_runtime_snapshot(true);
-                                    }
-                                    if let Some(dragged_id) = self.dragged_process.clone() {
-                                        if dragged_id != process.id
-                                            && row_response.hovered()
-                                            && ctx.input(|input| input.pointer.any_released())
-                                        {
-                                            reorder_to = Some((dragged_id.clone(), index));
+                                for item in self.sidebar_items() {
+                                    match item {
+                                        SidebarRenderItem::Group(group) => {
+                                            let summary = self.group_summary(&group);
+                                            let (row_response, toggle_response) = draw_group_row(
+                                                ui,
+                                                &group,
+                                                &summary,
+                                                self.is_group_selected(&group.id),
+                                            );
+                                            let toggle_clicked = toggle_response.clicked();
+                                            if let Some(first_member_id) =
+                                                group.process_ids.first().cloned()
+                                            {
+                                                drop_slots.push(SidebarDropSlot {
+                                                    y: row_response.rect.top(),
+                                                    left: row_response.rect.left() + 8.0,
+                                                    right: row_response.rect.right() - 8.0,
+                                                    target: SidebarDropTarget::TopLevel {
+                                                        before_process_id: Some(first_member_id),
+                                                    },
+                                                });
+                                            }
+                                            drop_slots.push(SidebarDropSlot {
+                                                y: row_response.rect.bottom(),
+                                                left: row_response.rect.left() + 26.0,
+                                                right: row_response.rect.right() - 8.0,
+                                                target: SidebarDropTarget::InGroup {
+                                                    group_id: group.id.clone(),
+                                                    before_process_id: group
+                                                        .process_ids
+                                                        .first()
+                                                        .cloned(),
+                                                },
+                                            });
+                                            row_response.context_menu(|ui| {
+                                                let expand_label = if group.expanded {
+                                                    "Collapse"
+                                                } else {
+                                                    "Expand"
+                                                };
+                                                if ui.button(expand_label).clicked() {
+                                                    toggle_group_id = Some(group.id.clone());
+                                                    ui.close();
+                                                }
+                                                if ui.button("Ungroup").clicked() {
+                                                    ungroup_id = Some(group.id.clone());
+                                                    ui.close();
+                                                }
+                                            });
+                                            if row_response.drag_started() {
+                                                self.dragged_sidebar_item =
+                                                    Some(SidebarDragItem::Group(group.id.clone()));
+                                                self.select_group(group.id.clone());
+                                                self.refresh_runtime_snapshot(true);
+                                            }
+                                            if toggle_clicked {
+                                                toggle_group_id = Some(group.id.clone());
+                                            } else if row_response.clicked() {
+                                                self.select_group(group.id.clone());
+                                                self.refresh_runtime_snapshot(true);
+                                            }
+                                            last_row_rect = Some(row_response.rect);
+                                            ui.add_space(2.0);
                                         }
-                                        if dragged_id != process.id && row_response.hovered() {
-                                            drag_insert_index = Some(index);
-                                        }
-                                    }
-                                    row_bounds.push(row_response.rect);
-                                    row_response.context_menu(|ui| {
-                                        let can_move_up = index > 0;
-                                        let can_move_down = index + 1 < process_count;
+                                        SidebarRenderItem::Process {
+                                            process,
+                                            group_id,
+                                            last_in_group,
+                                        } => {
+                                            let Some(index) = self.process_index(&process.id)
+                                            else {
+                                                continue;
+                                            };
+                                            let row_process = self
+                                                .process_config(&process.id)
+                                                .unwrap_or(process.clone());
+                                            let status = self
+                                                .runtime_snapshot
+                                                .statuses
+                                                .get(&row_process.id)
+                                                .cloned()
+                                                .unwrap_or(ProcessStatus::Stopped);
+                                            let resource_usage = self
+                                                .runtime_snapshot
+                                                .resource_usage
+                                                .get(&row_process.id)
+                                                .copied();
+                                            let is_selected =
+                                                self.is_process_selected(&row_process.id);
+                                            let flash_intensity = self
+                                                .process_row_flash_intensity(ctx, &row_process.id);
+                                            let row_response = draw_process_row(
+                                                ui,
+                                                &row_process,
+                                                &status,
+                                                resource_usage,
+                                                is_selected,
+                                                flash_intensity,
+                                                if group_id.is_some() { 18.0 } else { 0.0 },
+                                            );
+                                            self.update_process_label_hover(
+                                                ui,
+                                                &row_response,
+                                                &row_process,
+                                                &status,
+                                                resource_usage,
+                                            );
+                                            let row_clicked = row_response.clicked();
+                                            if row_response.drag_started() {
+                                                self.dragged_sidebar_item = Some(
+                                                    SidebarDragItem::Process(process.id.clone()),
+                                                );
+                                                self.select_single_process(process.id.clone());
+                                                self.refresh_runtime_snapshot(true);
+                                            }
+                                            if let Some(group_id) = group_id.clone() {
+                                                drop_slots.push(SidebarDropSlot {
+                                                    y: row_response.rect.top(),
+                                                    left: row_response.rect.left() + 26.0,
+                                                    right: row_response.rect.right() - 8.0,
+                                                    target: SidebarDropTarget::InGroup {
+                                                        group_id: group_id.clone(),
+                                                        before_process_id: Some(process.id.clone()),
+                                                    },
+                                                });
+                                                if last_in_group {
+                                                    drop_slots.push(SidebarDropSlot {
+                                                        y: row_response.rect.bottom(),
+                                                        left: row_response.rect.left() + 26.0,
+                                                        right: row_response.rect.right() - 8.0,
+                                                        target: SidebarDropTarget::InGroup {
+                                                            group_id,
+                                                            before_process_id: None,
+                                                        },
+                                                    });
+                                                }
+                                            } else {
+                                                drop_slots.push(SidebarDropSlot {
+                                                    y: row_response.rect.top(),
+                                                    left: row_response.rect.left() + 8.0,
+                                                    right: row_response.rect.right() - 8.0,
+                                                    target: SidebarDropTarget::TopLevel {
+                                                        before_process_id: Some(process.id.clone()),
+                                                    },
+                                                });
+                                            };
+                                            row_response.context_menu(|ui| {
+                                                let can_move_up = index > 0;
+                                                let can_move_down = index + 1 < process_count;
+                                                let can_group_selected =
+                                                    self.selected_processes.len() > 1;
 
-                                        if ui
-                                            .add_enabled(can_move_up, Button::new("Move up"))
-                                            .clicked()
-                                        {
-                                            move_up_id = Some(process.id.clone());
-                                            ui.close();
+                                                if ui
+                                                    .add_enabled(
+                                                        can_group_selected,
+                                                        Button::new("Group selected"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    group_selected_from_menu = true;
+                                                    ui.close();
+                                                }
+
+                                                if ui
+                                                    .add_enabled(
+                                                        can_move_up,
+                                                        Button::new("Move up"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    move_up_id = Some(process.id.clone());
+                                                    ui.close();
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        can_move_down,
+                                                        Button::new("Move down"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    move_down_id = Some(process.id.clone());
+                                                    ui.close();
+                                                }
+                                                if ui.button("Reload").clicked() {
+                                                    reload_process_id = Some(process.id.clone());
+                                                    ui.close();
+                                                }
+                                            });
+                                            if row_clicked {
+                                                let extend_range =
+                                                    ui.input(|input| input.modifiers.shift);
+                                                self.select_process_from_sidebar(
+                                                    process.id.clone(),
+                                                    extend_range,
+                                                );
+                                                self.refresh_runtime_snapshot(true);
+                                            }
+                                            last_row_rect = Some(row_response.rect);
+                                            ui.add_space(2.0);
                                         }
-                                        if ui
-                                            .add_enabled(can_move_down, Button::new("Move down"))
-                                            .clicked()
-                                        {
-                                            move_down_id = Some(process.id.clone());
-                                            ui.close();
-                                        }
-                                        if ui.button("Reload").clicked() {
-                                            reload_process_id = Some(process.id.clone());
-                                            ui.close();
-                                        }
-                                    });
-                                    if row_clicked {
-                                        self.selected_process = Some(process.id.clone());
-                                        self.refresh_runtime_snapshot(true);
                                     }
-                                    ui.add_space(2.0);
                                 }
 
-                                if self.dragged_process.is_some()
+                                if let Some(last_rect) = last_row_rect {
+                                    drop_slots.push(SidebarDropSlot {
+                                        y: last_rect.bottom(),
+                                        left: last_rect.left() + 8.0,
+                                        right: last_rect.right() - 8.0,
+                                        target: SidebarDropTarget::TopLevel {
+                                            before_process_id: None,
+                                        },
+                                    });
+                                }
+
+                                let active_drop =
+                                    self.dragged_sidebar_item.as_ref().and_then(|dragged| {
+                                        ctx.input(|input| {
+                                            input.pointer.interact_pos().and_then(|pointer_pos| {
+                                                self.nearest_sidebar_drop_slot(
+                                                    dragged,
+                                                    &drop_slots,
+                                                    pointer_pos,
+                                                )
+                                            })
+                                        })
+                                    });
+
+                                if self.dragged_sidebar_item.is_some()
                                     && ctx.input(|input| input.pointer.primary_down())
                                 {
-                                    let can_place_at_end = !row_bounds.is_empty()
-                                        && process_count > 0
-                                        && row_bounds.last().is_some_and(|last_rect| {
-                                            ctx.input(|input| {
-                                                input
-                                                    .pointer
-                                                    .interact_pos()
-                                                    .is_some_and(|pos| pos.y >= last_rect.max.y)
-                                            })
-                                        });
-                                    if can_place_at_end {
-                                        drag_insert_index = Some(process_count);
-                                    }
-                                    if let Some(insert_index) = drag_insert_index {
-                                        self.draw_drag_insert_marker(ui, &row_bounds, insert_index);
+                                    if let Some(slot) = active_drop.as_ref() {
+                                        self.draw_drag_insert_marker(ui, slot);
                                     }
                                 }
-                                if let Some((process_id, target_index)) = reorder_to {
-                                    self.move_process_to_index(&process_id, target_index);
-                                    self.dragged_process = None;
-                                } else if ctx.input(|input| input.pointer.any_released()) {
-                                    self.dragged_process = None;
-                                } else if let Some(process_id) = move_up_id {
+
+                                if let Some(process_id) = move_up_id {
                                     self.move_process_up(&process_id);
                                 } else if let Some(process_id) = move_down_id {
                                     self.move_process_down(&process_id);
                                 } else if let Some(process_id) = reload_process_id {
                                     self.reload_process_from_disk(&process_id);
+                                } else if let Some(group_id) = toggle_group_id {
+                                    self.toggle_group_expanded(&group_id);
+                                } else if let Some(group_id) = ungroup_id {
+                                    self.ungroup(&group_id);
+                                } else if group_selected_from_menu {
+                                    self.group_selected_processes();
+                                } else if ctx.input(|input| input.pointer.any_released()) {
+                                    if let (Some(dragged), Some(target)) =
+                                        (self.dragged_sidebar_item.clone(), active_drop)
+                                    {
+                                        self.apply_sidebar_drop(dragged, target.target);
+                                    }
+                                    self.dragged_sidebar_item = None;
                                 }
                             });
                     });
@@ -2005,7 +2697,11 @@ impl ProcessManagerApp {
                 ui.painter().rect_filled(inset_rect, inset_radius, BODY_BG);
 
                 ui.scope_builder(UiBuilder::new().max_rect(inset_rect), |ui| {
-                    if let Some(process) = self.selected_process_config() {
+                    if let Some(group) = self.selected_group_config() {
+                        self.draw_group_detail(ui, &group);
+                    } else if self.selected_processes.len() > 1 {
+                        self.draw_multi_selection_detail(ui);
+                    } else if let Some(process) = self.selected_process_config() {
                         self.draw_process_detail(ui, &process);
                     } else {
                         self.draw_empty_state(ui);
@@ -2034,6 +2730,297 @@ impl ProcessManagerApp {
                 });
             },
         );
+    }
+
+    fn draw_multi_selection_detail(&mut self, ui: &mut Ui) {
+        let selected_ids = self.selected_processes.clone();
+        let processes = self.selected_process_configs();
+        let summary = self.summarize_process_ids(&selected_ids);
+        let resource_summary = resource_usage_text(Some(summary.resource_usage), &summary.status)
+            .unwrap_or_else(|| "--".to_string());
+        let metadata = format!(
+            "{} selected | {} | {} | {}",
+            summary.counts.total,
+            summary.status,
+            resource_summary,
+            counts_detail(&summary.counts)
+        );
+
+        let mut action_group = false;
+        let mut action_start = false;
+        let mut action_stop = false;
+        let mut action_restart = false;
+
+        egui::Frame::default()
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .inner_margin(egui::Margin::symmetric(CONTENT_GUTTER_X, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width().min(500.0), 28.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if chrome_text_button(
+                                ui,
+                                "Group Selected",
+                                TEXT_MAIN,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                action_group = true;
+                            }
+                            ui.add_space(2.0);
+                            let (sep_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(1.0, 18.0), egui::Sense::hover());
+                            ui.painter().vline(
+                                sep_rect.center().x,
+                                sep_rect.y_range(),
+                                Stroke::new(1.0, Color32::from_white_alpha(15)),
+                            );
+                            ui.add_space(2.0);
+                            if chrome_text_button(
+                                ui,
+                                "▶ Start",
+                                TOOLBAR_GREEN,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_start = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "■ Stop",
+                                TOOLBAR_GRAY,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_stop = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "⟳ Restart",
+                                TOOLBAR_YELLOW,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_restart = true;
+                            }
+                        },
+                    );
+
+                    ui.add_space(10.0);
+                    draw_right_aligned_metadata(ui, &metadata);
+                });
+
+                ui.add_space(8.0);
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), 1.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.center().y,
+                    Stroke::new(1.0, Color32::from_white_alpha(10)),
+                );
+            });
+
+        self.draw_process_collection(ui, &processes);
+
+        if action_group {
+            self.group_selected_processes();
+        }
+        if action_restart {
+            self.restart_process_ids(&selected_ids);
+        }
+        if action_stop {
+            self.stop_process_ids(&selected_ids);
+        }
+        if action_start {
+            self.start_process_ids(&selected_ids);
+        }
+    }
+
+    fn draw_group_detail(&mut self, ui: &mut Ui, group: &ProcessGroupConfig) {
+        let process_ids = group.process_ids.clone();
+        let processes = self.group_members(group);
+        let summary = self.group_summary(group);
+        let resource_summary = resource_usage_text(Some(summary.resource_usage), &summary.status)
+            .unwrap_or_else(|| "--".to_string());
+        let metadata = format!(
+            "{} | {} process(es) | {} | {}",
+            summary.status,
+            summary.counts.total,
+            resource_summary,
+            counts_detail(&summary.counts)
+        );
+        let mut action_start = false;
+        let mut action_stop = false;
+        let mut action_restart = false;
+        let mut action_edit = false;
+        let mut action_ungroup = false;
+
+        egui::Frame::default()
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .inner_margin(egui::Margin::symmetric(CONTENT_GUTTER_X, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width().min(450.0), 28.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if chrome_text_button(
+                                ui,
+                                "▶ Start",
+                                TOOLBAR_GREEN,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_start = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "■ Stop",
+                                TOOLBAR_GRAY,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_stop = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "⟳ Restart",
+                                TOOLBAR_YELLOW,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_restart = true;
+                            }
+                            ui.add_space(2.0);
+                            let (sep_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(1.0, 18.0), egui::Sense::hover());
+                            ui.painter().vline(
+                                sep_rect.center().x,
+                                sep_rect.y_range(),
+                                Stroke::new(1.0, Color32::from_white_alpha(15)),
+                            );
+                            ui.add_space(2.0);
+                            if chrome_text_button(
+                                ui,
+                                "⚙ Edit",
+                                TOOLBAR_TEXT,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                action_edit = true;
+                            }
+                            if chrome_text_button(
+                                ui,
+                                "Ungroup",
+                                TOOLBAR_TEXT,
+                                Vec2::new(0.0, 28.0),
+                                12.0,
+                                false,
+                            )
+                            .on_hover_text("Remove this group while keeping its processes.")
+                            .clicked()
+                            {
+                                action_ungroup = true;
+                            }
+                        },
+                    );
+
+                    ui.add_space(10.0);
+                    let label = format!("{}  |  {}", group.name, metadata);
+                    draw_right_aligned_metadata(ui, &label);
+                });
+
+                ui.add_space(8.0);
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), 1.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.center().y,
+                    Stroke::new(1.0, Color32::from_white_alpha(10)),
+                );
+            });
+
+        self.draw_process_collection(ui, &processes);
+
+        if action_restart {
+            self.restart_process_ids(&process_ids);
+        }
+        if action_stop {
+            self.stop_process_ids(&process_ids);
+        }
+        if action_start {
+            self.start_process_ids(&process_ids);
+        }
+        if action_edit {
+            self.open_edit_group(&group.id);
+        }
+        if action_ungroup {
+            self.ungroup(&group.id);
+        }
+    }
+
+    fn draw_process_collection(&self, ui: &mut Ui, processes: &[ProcessConfig]) {
+        egui::Frame::default()
+            .fill(Color32::TRANSPARENT)
+            .inner_margin(egui::Margin::symmetric(CONTENT_GUTTER_X, 12))
+            .show(ui, |ui| {
+                let remaining_height = ui.available_height();
+                ScrollArea::vertical()
+                    .id_salt("process_collection")
+                    .auto_shrink([false, false])
+                    .max_height(remaining_height.max(0.0))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
+                        for process in processes {
+                            let status = self
+                                .runtime_snapshot
+                                .statuses
+                                .get(&process.id)
+                                .cloned()
+                                .unwrap_or(ProcessStatus::Stopped);
+                            let usage = self
+                                .runtime_snapshot
+                                .resource_usage
+                                .get(&process.id)
+                                .copied();
+                            draw_collection_process_row(ui, process, &status, usage);
+                        }
+                    });
+            });
     }
 
     fn draw_process_detail(&mut self, ui: &mut Ui, process: &ProcessConfig) {
@@ -2202,16 +3189,7 @@ impl ProcessManagerApp {
 
                     ui.add_space(10.0);
 
-                    let metadata_response = ui.add_sized(
-                        Vec2::new(ui.available_width().max(0.0), 28.0),
-                        egui::Label::new(
-                            RichText::new(metadata.as_str())
-                                .color(TEXT_MUTED)
-                                .size(11.5),
-                        )
-                        .truncate(),
-                    );
-                    metadata_response.on_hover_text(metadata);
+                    draw_right_aligned_metadata(ui, &metadata);
                 });
 
                 // Thin separator
@@ -2523,6 +3501,68 @@ impl ProcessManagerApp {
             }
         } else if close_dialog {
             self.process_dialog = None;
+        }
+    }
+
+    fn draw_group_dialog(&mut self, ctx: &Context) {
+        let mut close_dialog = false;
+        let mut submit_dialog = false;
+
+        if let Some(dialog) = self.group_dialog.as_mut() {
+            let mut open = true;
+            Window::new(dialog.title())
+                .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+                .collapsible(false)
+                .resizable(false)
+                .fixed_size([430.0, 220.0])
+                .frame(
+                    egui::Frame::window(&ctx.style())
+                        .fill(PANEL_BG)
+                        .stroke(Stroke::new(1.0, BORDER)),
+                )
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.set_width(430.0);
+                    let form = dialog.form_mut();
+                    let content_height = (ui.available_height() - MODAL_FOOTER_HEIGHT).max(80.0);
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), content_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(MODAL_FORM_WIDTH);
+                            ui.label(field_label("Name"));
+                            modal_text_edit(ui, &mut form.name, "Group 1", MODAL_FORM_WIDTH);
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("This label is shown in the process sidebar.")
+                                    .color(TEXT_MUTED)
+                                    .size(11.5),
+                            );
+                        },
+                    );
+
+                    modal_footer(ui, |ui| {
+                        if subtle_action_button(ui, "Save", Some(ACCENT_SOFT)).clicked() {
+                            submit_dialog = true;
+                        }
+                        if shell_button(ui, "Cancel").clicked() {
+                            close_dialog = true;
+                        }
+                    });
+                });
+
+            if !open {
+                close_dialog = true;
+            }
+        }
+
+        if submit_dialog {
+            if let Some(dialog) = self.group_dialog.take() {
+                self.apply_group_dialog(dialog);
+            }
+        } else if close_dialog {
+            self.group_dialog = None;
         }
     }
 
@@ -2981,6 +4021,7 @@ impl eframe::App for ProcessManagerApp {
         self.draw_header(ctx);
         self.draw_content(ctx);
         self.draw_process_dialog(ctx);
+        self.draw_group_dialog(ctx);
         self.draw_rest_settings_dialog(ctx);
         self.draw_delete_dialog(ctx);
         self.draw_reload_dialog(ctx);
@@ -3234,11 +4275,39 @@ fn draw_about_field(ui: &mut Ui, field: &AboutField) {
         });
 }
 
-fn stack_summary(counts: &ProcessCounts) -> String {
-    format!(
+fn stack_summary(counts: &ProcessCounts, resource_usage: Option<ProcessResourceUsage>) -> String {
+    let counts_summary = format!(
         "{} running | {} stopped | {} starting | {} errors",
         counts.running, counts.stopped, counts.starting, counts.error
-    )
+    );
+
+    if let Some(resource_summary) = resource_usage_text(resource_usage, &ProcessStatus::Running) {
+        format!("{resource_summary} | {counts_summary}")
+    } else {
+        counts_summary
+    }
+}
+
+fn draw_right_aligned_metadata(ui: &mut Ui, text: &str) {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width().max(0.0), 28.0),
+        egui::Sense::hover(),
+    );
+    let _ = response.on_hover_text(text);
+
+    if rect.width() <= 1.0 {
+        return;
+    }
+
+    ui.painter()
+        .with_clip_rect(rect.intersect(ui.clip_rect()))
+        .text(
+            Pos2::new(rect.right(), rect.center().y),
+            Align2::RIGHT_CENTER,
+            text,
+            FontId::proportional(11.5),
+            TEXT_MUTED,
+        );
 }
 
 fn shell_button(ui: &mut Ui, label: &str) -> egui::Response {
@@ -3308,6 +4377,134 @@ fn chrome_text_button(
     .inner
 }
 
+fn draw_group_row(
+    ui: &mut Ui,
+    group: &ProcessGroupConfig,
+    summary: &GroupRuntimeSummary,
+    selected: bool,
+) -> (egui::Response, egui::Response) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 34.0),
+        egui::Sense::click_and_drag(),
+    );
+
+    let bg_color = if selected {
+        PROCESS_ROW_SELECTED_BG
+    } else if response.hovered() {
+        PROCESS_ROW_HOVER_BG
+    } else {
+        Color32::TRANSPARENT
+    };
+
+    if bg_color != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 4.0, bg_color);
+    }
+
+    if selected {
+        let accent_rect = egui::Rect::from_min_size(
+            rect.min + egui::vec2(2.0, 8.0),
+            egui::vec2(2.0, rect.height() - 16.0),
+        );
+        ui.painter().rect_filled(accent_rect, 1.0, TEXT_MAIN);
+    }
+
+    let inner_rect = rect.shrink2(egui::vec2(14.0, 0.0));
+    let toggle_rect = egui::Rect::from_center_size(
+        egui::pos2(inner_rect.min.x + 8.0, rect.center().y),
+        egui::vec2(18.0, 26.0),
+    );
+    let toggle_response = ui.interact(
+        toggle_rect,
+        response.id.with("group_toggle"),
+        egui::Sense::click(),
+    );
+    let triangle = if group.expanded { "▾" } else { "▸" };
+    ui.painter().text(
+        toggle_rect.center(),
+        Align2::CENTER_CENTER,
+        triangle,
+        FontId::proportional(13.0),
+        if toggle_response.hovered() {
+            TEXT_MAIN
+        } else {
+            TEXT_MUTED
+        },
+    );
+
+    let dot_center = egui::pos2(inner_rect.min.x + 28.0, rect.center().y);
+    ui.painter()
+        .circle_filled(dot_center, 4.0, status_color(&summary.status, ui.ctx()));
+
+    let count_text = format!("{}/{}", summary.counts.running, summary.counts.total);
+    let resource_text = compact_resource_usage_text(Some(summary.resource_usage));
+    let metric_width = ui.fonts_mut(|fonts| {
+        let count_width = fonts
+            .layout_no_wrap(count_text.clone(), FontId::proportional(11.0), TEXT_MUTED)
+            .size()
+            .x;
+        let resource_width = resource_text.as_ref().map_or(0.0, |resource_text| {
+            fonts
+                .layout_no_wrap(
+                    resource_text.clone(),
+                    FontId::proportional(10.0),
+                    TEXT_MUTED,
+                )
+                .size()
+                .x
+        });
+        count_width.max(resource_width)
+    }) + 10.0;
+
+    let text_pos = egui::pos2(dot_center.x + 14.0, rect.center().y);
+    let name_clip_right = (inner_rect.max.x - metric_width).max(text_pos.x + 24.0);
+    let name_painter = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+        egui::pos2(text_pos.x, rect.min.y),
+        egui::pos2(name_clip_right, rect.max.y),
+    ));
+    name_painter.text(
+        text_pos,
+        Align2::LEFT_CENTER,
+        &group.name,
+        FontId::proportional(13.5),
+        if selected { TEXT_MAIN } else { TEXT_MUTED },
+    );
+
+    if let Some(resource_text) = resource_text {
+        ui.painter().text(
+            egui::pos2(inner_rect.max.x, rect.center().y - 5.5),
+            Align2::RIGHT_CENTER,
+            count_text,
+            FontId::proportional(11.0),
+            if selected { TEXT_SOFT } else { STOPPED },
+        );
+        ui.painter().text(
+            egui::pos2(inner_rect.max.x, rect.center().y + 8.0),
+            Align2::RIGHT_CENTER,
+            resource_text,
+            FontId::proportional(10.0),
+            TEXT_MUTED,
+        );
+    } else {
+        ui.painter().text(
+            egui::pos2(inner_rect.max.x, rect.center().y),
+            Align2::RIGHT_CENTER,
+            count_text,
+            FontId::proportional(11.0),
+            if selected { TEXT_SOFT } else { STOPPED },
+        );
+    }
+
+    let details = resource_usage_text(Some(summary.resource_usage), &summary.status)
+        .map(|resources| format!("{}\n{}", counts_detail(&summary.counts), resources))
+        .unwrap_or_else(|| counts_detail(&summary.counts));
+    let toggle_response = toggle_response.on_hover_text("Expand or collapse group");
+    let row_response = response
+        .union(toggle_response.clone())
+        .on_hover_text(details);
+
+    (row_response, toggle_response)
+}
+
 fn draw_process_row(
     ui: &mut Ui,
     process: &ProcessConfig,
@@ -3315,6 +4512,7 @@ fn draw_process_row(
     resource_usage: Option<ProcessResourceUsage>,
     selected: bool,
     flash_intensity: f32,
+    indent: f32,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 34.0),
@@ -3354,7 +4552,8 @@ fn draw_process_row(
         ui.painter().rect_filled(accent_rect, 1.0, TEXT_MAIN);
     }
 
-    let inner_rect = rect.shrink2(egui::vec2(14.0, 0.0));
+    let mut inner_rect = rect.shrink2(egui::vec2(14.0, 0.0));
+    inner_rect.min.x += indent;
     let metric_text = compact_resource_usage_text(resource_usage);
     let metric_width = if let Some(metric_text) = metric_text.as_deref() {
         ui.fonts_mut(|fonts| {
@@ -3419,6 +4618,94 @@ fn draw_process_row(
     }
 
     response
+}
+
+fn draw_collection_process_row(
+    ui: &mut Ui,
+    process: &ProcessConfig,
+    status: &ProcessStatus,
+    resource_usage: Option<ProcessResourceUsage>,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::hover());
+
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 4.0, PROCESS_ROW_HOVER_BG);
+    }
+
+    let inner_rect = rect.shrink2(egui::vec2(12.0, 0.0));
+    let dot_center = egui::pos2(inner_rect.min.x + 8.0, rect.center().y);
+    ui.painter()
+        .circle_filled(dot_center, 4.0, status_color(status, ui.ctx()));
+
+    let metric_text = compact_resource_usage_text(resource_usage).unwrap_or_else(|| "--".into());
+    let metric_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(metric_text.clone(), FontId::proportional(11.0), TEXT_MUTED)
+            .size()
+            .x
+    }) + 10.0;
+    let text_pos = egui::pos2(dot_center.x + 14.0, rect.center().y - 5.0);
+    let detail_pos = egui::pos2(dot_center.x + 14.0, rect.center().y + 9.0);
+    let text_clip_right = (inner_rect.max.x - metric_width).max(text_pos.x + 24.0);
+    let text_painter = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+        egui::pos2(text_pos.x, rect.min.y),
+        egui::pos2(text_clip_right, rect.max.y),
+    ));
+
+    text_painter.text(
+        text_pos,
+        Align2::LEFT_CENTER,
+        process_tab_label(process),
+        FontId::proportional(13.0),
+        TEXT_SOFT,
+    );
+    text_painter.text(
+        detail_pos,
+        Align2::LEFT_CENTER,
+        status.to_string(),
+        FontId::proportional(11.0),
+        TEXT_MUTED,
+    );
+    ui.painter().text(
+        egui::pos2(inner_rect.max.x, rect.center().y),
+        Align2::RIGHT_CENTER,
+        metric_text,
+        FontId::proportional(11.0),
+        STOPPED,
+    );
+
+    response
+}
+
+fn aggregate_resource_usage<'a>(
+    process_ids: impl IntoIterator<Item = &'a str>,
+    resource_usage: &HashMap<String, ProcessResourceUsage>,
+) -> Option<ProcessResourceUsage> {
+    let mut cpu_total = 0.0f32;
+    let mut has_cpu = false;
+    let mut memory_total = 0u64;
+    let mut has_memory = false;
+
+    for process_id in process_ids {
+        let Some(usage) = resource_usage.get(process_id).copied() else {
+            continue;
+        };
+
+        if let Some(cpu_percent) = usage.cpu_percent {
+            cpu_total += cpu_percent;
+            has_cpu = true;
+        }
+        if let Some(memory_bytes) = usage.memory_bytes {
+            memory_total = memory_total.saturating_add(memory_bytes);
+            has_memory = true;
+        }
+    }
+
+    (has_cpu || has_memory).then_some(ProcessResourceUsage {
+        cpu_percent: has_cpu.then_some(cpu_total),
+        memory_bytes: has_memory.then_some(memory_total),
+    })
 }
 
 fn compact_resource_usage_text(usage: Option<ProcessResourceUsage>) -> Option<String> {
@@ -3562,6 +4849,13 @@ fn global_controls_summary(process: &ProcessConfig) -> &'static str {
         (false, false, false) => "ignored",
         _ => "custom",
     }
+}
+
+fn counts_detail(counts: &ProcessCounts) -> String {
+    format!(
+        "{} running, {} stopped, {} starting, {} stopping, {} error",
+        counts.running, counts.stopped, counts.starting, counts.stopping, counts.error
+    )
 }
 
 fn draw_sidebar_footer_button(ui: &mut Ui, label: &str) -> egui::Response {
