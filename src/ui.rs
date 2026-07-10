@@ -605,6 +605,7 @@ pub struct ProcessManagerApp {
     last_focus_state: Option<bool>,
     last_viewport_size: Option<Vec2>,
     last_manager_version: u64,
+    last_rest_config_reload_version: u64,
     snapshot_selected_process: Option<String>,
     runtime_snapshot: UiRuntimeSnapshot,
     diagnostics: DiagnosticsState,
@@ -701,6 +702,7 @@ impl ProcessManagerApp {
             last_focus_state: None,
             last_viewport_size: None,
             last_manager_version,
+            last_rest_config_reload_version: 0,
             snapshot_selected_process: selected_process.clone(),
             runtime_snapshot,
             diagnostics: DiagnosticsState {
@@ -1693,6 +1695,31 @@ impl ProcessManagerApp {
         self.last_manager_version = current_version;
         self.snapshot_selected_process = self.selected_process.clone();
         self.record_snapshot_refresh(started.elapsed());
+    }
+
+    fn sync_rest_config_reload(&mut self) {
+        let event = self.rest_controller.config_reload_event();
+        if event.version == self.last_rest_config_reload_version {
+            return;
+        }
+        self.last_rest_config_reload_version = event.version;
+
+        let Some(config) = event.config else {
+            return;
+        };
+
+        if let Some(process_id) = event.process_id {
+            if let Some(process) = config.get_process(&process_id).cloned() {
+                self.config.update_process(&process_id, process);
+            }
+        } else {
+            self.config = config;
+            self.rest_settings_form = RestSettingsForm::from_config(&self.config);
+            self.last_process_error_versions = self.manager.error_versions();
+            self.process_row_flashes.clear();
+            self.ensure_valid_selection();
+        }
+        self.refresh_runtime_snapshot(true);
     }
 
     fn select_log_line(&mut self, process_id: &str, log_index: usize, extend_range: bool) {
@@ -4000,6 +4027,7 @@ impl eframe::App for ProcessManagerApp {
         let caption_changed = self.refresh_shell_bg_from_windows_caption(focused);
         self.handle_shortcuts(ctx);
         self.maybe_request_attention(ctx);
+        self.sync_rest_config_reload();
         self.refresh_runtime_snapshot(false);
 
         // Keep global panel_fill in sync with the live shell_bg from caption probe

@@ -95,7 +95,15 @@ struct ActiveServer {
 struct ApiState {
     manager: Arc<ProcessManager>,
     stack_name: Arc<RwLock<String>>,
+    config_reload_tx: watch::Sender<ConfigReloadEvent>,
     port: u16,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConfigReloadEvent {
+    pub version: u64,
+    pub config: Option<AppConfig>,
+    pub process_id: Option<String>,
 }
 
 pub struct RestServerController {
@@ -105,6 +113,7 @@ pub struct RestServerController {
     active_server: Mutex<Option<ActiveServer>>,
     generation: Arc<AtomicU64>,
     snapshot_tx: watch::Sender<RestServerSnapshot>,
+    config_reload_tx: watch::Sender<ConfigReloadEvent>,
 }
 
 impl RestServerController {
@@ -112,6 +121,7 @@ impl RestServerController {
         let default_remote = RemoteControlConfig::default();
         let (snapshot_tx, _snapshot_rx) =
             watch::channel(RestServerSnapshot::disabled(default_remote.port));
+        let (config_reload_tx, _config_reload_rx) = watch::channel(ConfigReloadEvent::default());
         Self {
             manager,
             stack_name: Arc::new(RwLock::new(String::new())),
@@ -119,11 +129,16 @@ impl RestServerController {
             active_server: Mutex::new(None),
             generation: Arc::new(AtomicU64::new(0)),
             snapshot_tx,
+            config_reload_tx,
         }
     }
 
     pub fn snapshot(&self) -> RestServerSnapshot {
         self.snapshot_tx.borrow().clone()
+    }
+
+    pub fn config_reload_event(&self) -> ConfigReloadEvent {
+        self.config_reload_tx.borrow().clone()
     }
 
     pub fn apply_config(&self, stack_name: String, remote_control: RemoteControlConfig) {
@@ -163,6 +178,7 @@ impl RestServerController {
         let app_state = ApiState {
             manager: self.manager.clone(),
             stack_name: self.stack_name.clone(),
+            config_reload_tx: self.config_reload_tx.clone(),
             port: remote_control.port,
         };
         let router = Router::new()
@@ -512,6 +528,7 @@ async fn reload_stack(State(state): State<ApiState>) -> impl IntoResponse {
         .manager
         .set_log_directory(config.log_directory.clone());
     state.manager.reload_from_config(&config.processes);
+    publish_config_reload(&state.config_reload_tx, config, None);
     Json(stack_ack_with_message(
         "reload",
         format!(
@@ -561,12 +578,8 @@ async fn reload_process(
 
     config.normalize();
 
-    let updated_process = match config
-        .processes
-        .into_iter()
-        .find(|process| process.id == id)
-    {
-        Some(process) => process,
+    let updated_process = match config.processes.iter().find(|process| process.id == id) {
+        Some(process) => process.clone(),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -593,6 +606,8 @@ async fn reload_process(
             .into_response();
     }
 
+    publish_config_reload(&state.config_reload_tx, config, Some(id.clone()));
+
     (
         StatusCode::OK,
         Json(AckResponse {
@@ -607,6 +622,42 @@ async fn reload_process(
         }),
     )
         .into_response()
+}
+
+fn publish_config_reload(
+    tx: &watch::Sender<ConfigReloadEvent>,
+    config: AppConfig,
+    process_id: Option<String>,
+) {
+    tx.send_modify(move |event| {
+        *event = ConfigReloadEvent {
+            version: event.version.wrapping_add(1),
+            config: Some(config),
+            process_id,
+        };
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_reload_events_advance_and_preserve_scope() {
+        let (tx, rx) = watch::channel(ConfigReloadEvent::default());
+        drop(rx);
+
+        publish_config_reload(&tx, AppConfig::default(), None);
+        let stack_event = tx.borrow().clone();
+        assert_eq!(stack_event.version, 1);
+        assert!(stack_event.config.is_some());
+        assert_eq!(stack_event.process_id, None);
+
+        publish_config_reload(&tx, AppConfig::default(), Some("worker".to_string()));
+        let process_event = tx.borrow().clone();
+        assert_eq!(process_event.version, 2);
+        assert_eq!(process_event.process_id.as_deref(), Some("worker"));
+    }
 }
 
 async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
