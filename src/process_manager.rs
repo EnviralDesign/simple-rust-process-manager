@@ -2060,15 +2060,17 @@ fn stop_process_inner(
 
             #[cfg(windows)]
             {
-                let had_job = job_to_close.is_some();
-                if let Some(job) = job_to_close {
-                    drop(job);
-                }
-                if let Err(e) = kill_process_tree(pid) {
-                    if !had_job {
-                        stop_error = Some(e);
-                        let _ = child.kill();
-                    }
+                // Kill from the managed root while it still exists.  Releasing a
+                // kill-on-close Job Object first can terminate the wrapper (for
+                // example, PowerShell) before `taskkill /T` gets to walk its
+                // descendants, leaving a child that did not inherit the job
+                // orphaned.  The job is still closed immediately afterward as a
+                // second cleanup mechanism for every process that did inherit it.
+                if let Err(e) =
+                    kill_tree_before_closing_job(|| kill_process_tree(pid), || drop(job_to_close))
+                {
+                    stop_error = Some(e);
+                    let _ = child.kill();
                 }
             }
             #[cfg(not(windows))]
@@ -2639,6 +2641,17 @@ fn parse_command(command: &str) -> Result<(String, Vec<String>), String> {
 }
 
 #[cfg(windows)]
+fn kill_tree_before_closing_job<K, C>(kill_tree: K, close_job: C) -> Result<(), String>
+where
+    K: FnOnce() -> Result<(), String>,
+    C: FnOnce(),
+{
+    let tree_result = kill_tree();
+    close_job();
+    tree_result
+}
+
+#[cfg(windows)]
 fn kill_process_tree(pid: u32) -> Result<(), String> {
     let mut cmd = Command::new("taskkill");
     cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
@@ -2754,6 +2767,11 @@ fn refresh_docker_status_inner(
 mod tests {
     use super::sanitize_runtime_log_line;
 
+    #[cfg(windows)]
+    use super::kill_tree_before_closing_job;
+    #[cfg(windows)]
+    use std::cell::RefCell;
+
     #[test]
     fn strips_ansi_csi_sequences() {
         let line = "\u{1b}[32mready in\u{1b}[39m \u{1b}[1m406\u{1b}[22m ms";
@@ -2764,5 +2782,39 @@ mod tests {
     fn strips_ansi_osc_sequences() {
         let line = "\u{1b}]0;Process Manager\u{7}server started";
         assert_eq!(sanitize_runtime_log_line(line), "server started");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stop_kills_the_tree_before_releasing_the_job() {
+        let events = RefCell::new(Vec::new());
+
+        let result = kill_tree_before_closing_job(
+            || {
+                events.borrow_mut().push("tree");
+                Ok(())
+            },
+            || events.borrow_mut().push("job"),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(*events.borrow(), vec!["tree", "job"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_stop_still_releases_the_job_after_tree_kill_failure() {
+        let events = RefCell::new(Vec::new());
+
+        let result = kill_tree_before_closing_job(
+            || {
+                events.borrow_mut().push("tree");
+                Err("taskkill failed".to_string())
+            },
+            || events.borrow_mut().push("job"),
+        );
+
+        assert_eq!(result.unwrap_err(), "taskkill failed");
+        assert_eq!(*events.borrow(), vec!["tree", "job"]);
     }
 }
