@@ -3026,13 +3026,16 @@ impl ProcessManagerApp {
         self.draw_process_collection(ui, &processes);
 
         if action_restart {
-            self.restart_process_ids(&process_ids);
+            self.manager
+                .restart_processes_respecting_restart_all(&process_ids);
         }
         if action_stop {
-            self.stop_process_ids(&process_ids);
+            self.manager
+                .stop_processes_respecting_stop_all(&process_ids);
         }
         if action_start {
-            self.start_process_ids(&process_ids);
+            self.manager
+                .start_processes_respecting_start_all(&process_ids);
         }
         if action_edit {
             self.open_edit_group(&group.id);

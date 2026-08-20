@@ -158,6 +158,13 @@ pub struct ProcessManager {
     schedule_state: Arc<Mutex<HashMap<String, ProcessScheduleState>>>,
 }
 
+#[derive(Clone, Copy)]
+enum StackControlAction {
+    Start,
+    Stop,
+    Restart,
+}
+
 impl Default for ProcessManager {
     fn default() -> Self {
         Self::new()
@@ -1075,6 +1082,16 @@ impl ProcessManager {
         }
     }
 
+    /// Start selected processes that opt into Start All. Returns the number requested.
+    pub fn start_processes_respecting_start_all(&self, process_ids: &[String]) -> usize {
+        let ids =
+            self.process_ids_responding_to_stack_control(process_ids, StackControlAction::Start);
+        for id in &ids {
+            self.start_process(id);
+        }
+        ids.len()
+    }
+
     /// Start only processes explicitly marked for auto-start on app launch
     pub fn start_auto_start_processes(&self) {
         let ids: Vec<String> = {
@@ -1104,6 +1121,16 @@ impl ProcessManager {
         for id in ids {
             self.stop_process(&id);
         }
+    }
+
+    /// Stop selected processes that opt into Stop All. Returns the number requested.
+    pub fn stop_processes_respecting_stop_all(&self, process_ids: &[String]) -> usize {
+        let ids =
+            self.process_ids_responding_to_stack_control(process_ids, StackControlAction::Stop);
+        for id in &ids {
+            self.stop_process(id);
+        }
+        ids.len()
     }
 
     /// Stop all managed processes regardless of stack-control flags.
@@ -1169,6 +1196,45 @@ impl ProcessManager {
         for id in ids {
             self.start_process(&id);
         }
+    }
+
+    /// Restart selected processes that opt into Restart All. Returns the number requested.
+    pub fn restart_processes_respecting_restart_all(&self, process_ids: &[String]) -> usize {
+        let ids =
+            self.process_ids_responding_to_stack_control(process_ids, StackControlAction::Restart);
+
+        for id in &ids {
+            self.stop_process(id);
+        }
+
+        if !self.wait_for_processes_to_stop(&ids, Duration::from_secs(5)) {
+            println!("[WARN] Restart selected timeout waiting for stops");
+        }
+
+        for id in &ids {
+            self.start_process(id);
+        }
+
+        ids.len()
+    }
+
+    fn process_ids_responding_to_stack_control(
+        &self,
+        process_ids: &[String],
+        action: StackControlAction,
+    ) -> Vec<String> {
+        let processes = self.processes.lock().unwrap();
+        process_ids
+            .iter()
+            .filter(|id| {
+                processes.get(*id).is_some_and(|state| match action {
+                    StackControlAction::Start => state.config.respond_to_start_all,
+                    StackControlAction::Stop => state.config.respond_to_stop_all,
+                    StackControlAction::Restart => state.config.respond_to_restart_all,
+                })
+            })
+            .cloned()
+            .collect()
     }
 
     /// Stop all non-Docker processes (called on app shutdown)
@@ -2765,7 +2831,8 @@ fn refresh_docker_status_inner(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_runtime_log_line;
+    use super::{sanitize_runtime_log_line, ProcessManager, StackControlAction};
+    use crate::config::{ProcessConfig, ProcessType};
 
     #[cfg(windows)]
     use super::kill_tree_before_closing_job;
@@ -2782,6 +2849,57 @@ mod tests {
     fn strips_ansi_osc_sequences() {
         let line = "\u{1b}]0;Process Manager\u{7}server started";
         assert_eq!(sanitize_runtime_log_line(line), "server started");
+    }
+
+    #[test]
+    fn selected_stack_controls_use_the_matching_process_preference() {
+        fn process(id: &str, start: bool, stop: bool, restart: bool) -> ProcessConfig {
+            let mut process = ProcessConfig::new(
+                id.to_string(),
+                "cmd.exe".to_string(),
+                String::new(),
+                ProcessType::Process,
+            );
+            process.id = id.to_string();
+            process.respond_to_start_all = start;
+            process.respond_to_stop_all = stop;
+            process.respond_to_restart_all = restart;
+            process
+        }
+
+        let manager = ProcessManager::new();
+        for process in [
+            process("start", true, false, false),
+            process("stop", false, true, false),
+            process("restart", false, false, true),
+            process("all", true, true, true),
+        ] {
+            manager.add_process(process);
+        }
+        let selected_ids = vec![
+            "start".to_string(),
+            "stop".to_string(),
+            "restart".to_string(),
+            "all".to_string(),
+        ];
+
+        assert_eq!(
+            manager
+                .process_ids_responding_to_stack_control(&selected_ids, StackControlAction::Start),
+            vec!["start", "all"]
+        );
+        assert_eq!(
+            manager
+                .process_ids_responding_to_stack_control(&selected_ids, StackControlAction::Stop),
+            vec!["stop", "all"]
+        );
+        assert_eq!(
+            manager.process_ids_responding_to_stack_control(
+                &selected_ids,
+                StackControlAction::Restart
+            ),
+            vec!["restart", "all"]
+        );
     }
 
     #[cfg(windows)]

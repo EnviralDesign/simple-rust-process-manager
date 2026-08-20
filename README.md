@@ -96,7 +96,7 @@ This panel controls:
 
 - Expand and collapse group rows to keep long stacks readable.
 - See aggregate CPU/RAM for each group row at a glance.
-- Start, stop, or restart a group through the UI or the REST API.
+- Start, stop, or restart a group through the UI or the REST API; each action honors its members' matching stack-control setting.
 
 ### Live Logs
 

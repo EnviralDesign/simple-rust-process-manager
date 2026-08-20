@@ -729,17 +729,17 @@ async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
             EndpointDoc {
                 method: "POST",
                 path: "/groups/{id}/start",
-                description: "Starts every process in one configured group.",
+                description: "Starts group members that opt into Start All.",
             },
             EndpointDoc {
                 method: "POST",
                 path: "/groups/{id}/stop",
-                description: "Stops every process in one configured group.",
+                description: "Stops group members that opt into Stop All.",
             },
             EndpointDoc {
                 method: "POST",
                 path: "/groups/{id}/restart",
-                description: "Restarts every process in one configured group.",
+                description: "Restarts group members that opt into Restart All.",
             },
             EndpointDoc {
                 method: "POST",
@@ -846,24 +846,12 @@ fn group_action(
     let process_ids = group.process_ids.clone();
     let group_name = group.name.clone();
 
-    match action {
-        "start" => {
-            for process_id in &process_ids {
-                manager.start_process(process_id);
-            }
-        }
-        "stop" => {
-            for process_id in &process_ids {
-                manager.stop_process(process_id);
-            }
-        }
-        "restart" => {
-            for process_id in &process_ids {
-                manager.restart_process(process_id);
-            }
-        }
-        _ => {}
-    }
+    let affected_count = match action {
+        "start" => manager.start_processes_respecting_start_all(&process_ids),
+        "stop" => manager.stop_processes_respecting_stop_all(&process_ids),
+        "restart" => manager.restart_processes_respecting_restart_all(&process_ids),
+        _ => 0,
+    };
 
     (
         StatusCode::OK,
@@ -873,9 +861,10 @@ fn group_action(
             action,
             target_id: Some(id),
             message: format!(
-                "{} requested for group '{}' ({} process(es))",
+                "{} requested for group '{}' ({} eligible of {} process(es))",
                 capitalize(action),
                 group_name,
+                affected_count,
                 process_ids.len()
             ),
         }),
@@ -1045,7 +1034,7 @@ pub fn build_agent_bootstrap(
             .to_string(),
         "8. Use POST /stack/start, /stack/stop, or /stack/restart for entries that opt into each stack control."
             .to_string(),
-        "9. Use POST /groups/{id}/start, /stop, or /restart for every member of one group."
+        "9. Use POST /groups/{id}/start, /stop, or /restart for group members that opt into the corresponding stack control."
             .to_string(),
         "10. Use POST /processes/{id}/start, /stop, or /restart for a single component."
             .to_string(),
