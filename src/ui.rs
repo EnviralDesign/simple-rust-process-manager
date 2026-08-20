@@ -1345,6 +1345,20 @@ impl ProcessManagerApp {
         self.set_banner("Process deleted.");
     }
 
+    fn duplicate_process(&mut self, process_id: &str) {
+        let Some(duplicate) = self.config.duplicate_process(process_id) else {
+            self.set_banner("Process no longer exists.");
+            return;
+        };
+
+        self.manager.add_process(duplicate.clone());
+        self.persist_config();
+        self.last_process_error_versions = self.manager.error_versions();
+        self.select_single_process(duplicate.id.clone());
+        self.refresh_runtime_snapshot(true);
+        self.set_banner(format!("Created duplicate '{}'.", duplicate.name));
+    }
+
     fn move_process_up(&mut self, process_id: &str) {
         if self.config.move_process_up(process_id) {
             self.persist_config();
@@ -2430,6 +2444,7 @@ impl ProcessManagerApp {
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 let process_count = self.config.processes.len();
+                                let mut duplicate_process_id: Option<String> = None;
                                 let mut move_up_id: Option<String> = None;
                                 let mut move_down_id: Option<String> = None;
                                 let mut reload_process_id: Option<String> = None;
@@ -2592,6 +2607,11 @@ impl ProcessManagerApp {
                                                 let can_group_selected =
                                                     self.selected_processes.len() > 1;
 
+                                                if ui.button("Duplicate").clicked() {
+                                                    duplicate_process_id = Some(process.id.clone());
+                                                    ui.close();
+                                                }
+
                                                 if ui
                                                     .add_enabled(
                                                         can_group_selected,
@@ -2675,7 +2695,9 @@ impl ProcessManagerApp {
                                     }
                                 }
 
-                                if let Some(process_id) = move_up_id {
+                                if let Some(process_id) = duplicate_process_id {
+                                    self.duplicate_process(&process_id);
+                                } else if let Some(process_id) = move_up_id {
                                     self.move_process_up(&process_id);
                                 } else if let Some(process_id) = move_down_id {
                                     self.move_process_down(&process_id);

@@ -635,6 +635,34 @@ impl AppConfig {
         self.processes.push(config);
     }
 
+    /// Clone a process directly after its source, preserving its group membership and position.
+    pub fn duplicate_process(&mut self, id: &str) -> Option<ProcessConfig> {
+        let source_index = self.processes.iter().position(|process| process.id == id)?;
+        let mut duplicate = self.processes[source_index].clone();
+        duplicate.id = Uuid::new_v4().to_string();
+        duplicate.name = format!("{} (dup)", duplicate.name);
+        duplicate.normalize();
+
+        self.processes.insert(source_index + 1, duplicate.clone());
+
+        if let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|group| group.process_ids.iter().any(|process_id| process_id == id))
+        {
+            let source_member_index = group
+                .process_ids
+                .iter()
+                .position(|process_id| process_id == id)
+                .expect("group membership was checked above");
+            group
+                .process_ids
+                .insert(source_member_index + 1, duplicate.id.clone());
+        }
+
+        Some(duplicate)
+    }
+
     /// Remove a process by ID
     pub fn remove_process(&mut self, id: &str) {
         self.processes.retain(|p| p.id != id);
@@ -1128,6 +1156,78 @@ mod tests {
         );
         assert_eq!(config.groups[1].name, "Process Group");
         assert_eq!(config.groups[1].process_ids, vec![second_id]);
+    }
+
+    #[test]
+    fn duplicate_process_inserts_a_renamed_clone_after_its_source() {
+        fn process(id: &str, name: &str) -> ProcessConfig {
+            let mut process = ProcessConfig::new(
+                name.to_string(),
+                "cmd.exe".to_string(),
+                "C:/work".to_string(),
+                ProcessType::Process,
+            );
+            process.id = id.to_string();
+            process.auto_start = true;
+            process.auto_restart = true;
+            process
+        }
+
+        let mut config = AppConfig {
+            processes: vec![process("a", "API"), process("b", "Worker")],
+            ..AppConfig::default()
+        };
+
+        let duplicate = config
+            .duplicate_process("a")
+            .expect("existing process should duplicate");
+
+        assert_ne!(duplicate.id, "a");
+        assert_eq!(duplicate.name, "API (dup)");
+        assert_eq!(duplicate.command, "cmd.exe");
+        assert_eq!(duplicate.working_directory, "C:/work");
+        assert!(duplicate.auto_start);
+        assert!(duplicate.auto_restart);
+        assert_eq!(process_ids(&config), vec!["a", duplicate.id.as_str(), "b"]);
+        assert!(config.duplicate_process("missing").is_none());
+    }
+
+    #[test]
+    fn duplicate_grouped_process_stays_directly_after_its_source_in_the_group() {
+        fn process(id: &str) -> ProcessConfig {
+            let mut process = ProcessConfig::new(
+                id.to_string(),
+                "cmd.exe".to_string(),
+                String::new(),
+                ProcessType::Process,
+            );
+            process.id = id.to_string();
+            process
+        }
+
+        let mut config = AppConfig {
+            processes: vec![process("a"), process("b"), process("c"), process("d")],
+            groups: vec![ProcessGroupConfig {
+                id: "group-1".to_string(),
+                name: "Services".to_string(),
+                process_ids: vec!["b".to_string(), "c".to_string()],
+                expanded: true,
+            }],
+            ..AppConfig::default()
+        };
+
+        let duplicate = config
+            .duplicate_process("c")
+            .expect("group member should duplicate");
+
+        assert_eq!(
+            process_ids(&config),
+            vec!["a", "b", "c", duplicate.id.as_str(), "d"]
+        );
+        assert_eq!(
+            config.groups[0].process_ids,
+            vec!["b".to_string(), "c".to_string(), duplicate.id]
+        );
     }
 
     #[test]
