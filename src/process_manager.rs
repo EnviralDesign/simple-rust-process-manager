@@ -740,11 +740,9 @@ impl ProcessManager {
                                                         "[Managed process went down. Restarting...]"
                                                             .to_string(),
                                                     );
-                                                    state.status = ProcessStatus::Starting;
                                                     should_schedule_restart = true;
-                                                } else {
-                                                    state.status = ProcessStatus::Stopped;
                                                 }
+                                                state.status = ProcessStatus::Stopped;
                                                 state.suppress_restart_once = false;
                                                 state.child = None;
                                                 state.disk_log = None;
@@ -2791,7 +2789,7 @@ fn refresh_docker_status_inner(
                             state,
                             "[Container stopped unexpectedly. Restarting...]".to_string(),
                         );
-                        state.status = ProcessStatus::Starting;
+                        state.status = ProcessStatus::Stopped;
                         should_schedule_restart = true;
                         updated = true;
                     } else {
@@ -2838,6 +2836,92 @@ mod tests {
     use super::kill_tree_before_closing_job;
     #[cfg(windows)]
     use std::cell::RefCell;
+
+    #[cfg(windows)]
+    fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_restart_relaunches_after_clean_and_error_exits() {
+        for exit_code in [0, 7] {
+            let marker =
+                std::env::temp_dir().join(format!("procman-restart-{}.txt", uuid::Uuid::new_v4()));
+            let script = marker.with_extension("cmd");
+            std::fs::write(
+                &script,
+                format!(
+                    "@echo launched>>\"{}\"\r\n@exit /B {}\r\n",
+                    marker.display(),
+                    exit_code
+                ),
+            )
+            .unwrap();
+            let manager = ProcessManager::new();
+            let mut config = ProcessConfig::new(
+                "restart regression".to_string(),
+                format!("\"{}\"", script.display()),
+                String::new(),
+                ProcessType::Process,
+            );
+            config.auto_restart = true;
+            let id = config.id.clone();
+            manager.add_process(config);
+            manager.start_process(&id);
+            let relaunched = wait_until(|| {
+                std::fs::read_to_string(&marker)
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+                    >= 3
+            });
+            manager.stop_process(&id);
+            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_file(&script);
+            assert!(
+                relaunched,
+                "exit code {exit_code} did not repeatedly relaunch"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn manual_stop_cancels_pending_managed_restart() {
+        let manager = ProcessManager::new();
+        let mut config = ProcessConfig::new(
+            "cancel restart regression".to_string(),
+            "cmd.exe /D /C exit /B 0".to_string(),
+            String::new(),
+            ProcessType::Process,
+        );
+        config.auto_restart = true;
+        let id = config.id.clone();
+        manager.add_process(config);
+        manager.start_process(&id);
+        assert!(wait_until(|| {
+            manager.processes.lock().unwrap()[&id]
+                .logs
+                .iter()
+                .any(|line| line.contains("Restarting..."))
+        }));
+        manager.stop_process(&id);
+        let generation = manager.processes.lock().unwrap()[&id].start_generation;
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        let processes = manager.processes.lock().unwrap();
+        let state = &processes[&id];
+        assert_eq!(state.status, super::ProcessStatus::Stopped);
+        assert!(state.child.is_none());
+        assert_eq!(state.start_generation, generation);
+    }
 
     #[test]
     fn strips_ansi_csi_sequences() {
