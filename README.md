@@ -321,7 +321,6 @@ Useful launch-time environment overrides:
 - `PM_RENDERER=wgpu-vulkan` to force Vulkan
 - `PM_RENDERER=glow` to use the OpenGL backend
 - `PM_VSYNC=false` to disable vsync
-- `PM_CAPTION_SYNC=startup` or `PM_CAPTION_SYNC=continuous` to re-enable Windows title-bar color sampling if you specifically want that cosmetic behavior
 - `PM_DIAGNOSTICS=true` to write a diagnostics log next to the executable
 
 Examples in PowerShell:

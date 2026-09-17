@@ -78,13 +78,6 @@ const PROJECT_GITHUB_ACCOUNT_URL: &str = "https://github.com/EnviralDesign";
 const PROJECT_GITHUB_ACCOUNT_HANDLE: &str = "@EnviralDesign";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CaptionSyncMode {
-    Off,
-    Startup,
-    Continuous,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RendererProfile {
     WgpuDefault,
     WgpuDx12,
@@ -115,7 +108,6 @@ struct RuntimeToggles {
     present: PresentProfile,
     vsync: bool,
     run_and_return: bool,
-    caption_sync: CaptionSyncMode,
     diagnostics: bool,
 }
 
@@ -126,9 +118,6 @@ impl RuntimeToggles {
             present: default_present_profile(),
             vsync: default_vsync_enabled(),
             run_and_return: false,
-            // Screen readback for title-bar sampling is purely cosmetic and can
-            // become expensive on some Windows GPU / remote-desktop setups.
-            caption_sync: CaptionSyncMode::Off,
             diagnostics: false,
         };
 
@@ -160,16 +149,6 @@ impl RuntimeToggles {
         toggles.run_and_return = std::env::var("PM_RUN_AND_RETURN")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-
-        toggles.caption_sync = match std::env::var("PM_CAPTION_SYNC")
-            .unwrap_or_else(|_| default_caption_sync_label(toggles.caption_sync).to_string())
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "off" => CaptionSyncMode::Off,
-            "continuous" => CaptionSyncMode::Continuous,
-            _ => CaptionSyncMode::Startup,
-        };
 
         toggles.diagnostics = std::env::var("PM_DIAGNOSTICS")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -222,14 +201,6 @@ fn default_present_label(present: PresentProfile) -> &'static str {
     }
 }
 
-fn default_caption_sync_label(mode: CaptionSyncMode) -> &'static str {
-    match mode {
-        CaptionSyncMode::Off => "off",
-        CaptionSyncMode::Startup => "startup",
-        CaptionSyncMode::Continuous => "continuous",
-    }
-}
-
 #[derive(Default)]
 struct DiagnosticsState {
     start_time: Option<Instant>,
@@ -237,7 +208,6 @@ struct DiagnosticsState {
     slow_updates: u64,
     max_update_ms: f32,
     max_snapshot_ms: f32,
-    max_caption_probe_ms: f32,
     last_summary: Option<Instant>,
     log_path: Option<PathBuf>,
     session_label: Option<String>,
@@ -599,10 +569,6 @@ pub struct ProcessManagerApp {
     taskbar_big_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
     #[cfg(windows)]
     taskbar_small_icon_handle: Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON>,
-    shell_bg: Color32,
-    caption_color_initialized: bool,
-    next_caption_probe: Instant,
-    last_focus_state: Option<bool>,
     last_viewport_size: Option<Vec2>,
     last_manager_version: u64,
     last_rest_config_reload_version: u64,
@@ -696,10 +662,6 @@ impl ProcessManagerApp {
             taskbar_big_icon_handle: None,
             #[cfg(windows)]
             taskbar_small_icon_handle: None,
-            shell_bg: SHELL_BG,
-            caption_color_initialized: false,
-            next_caption_probe: Instant::now(),
-            last_focus_state: None,
             last_viewport_size: None,
             last_manager_version,
             last_rest_config_reload_version: 0,
@@ -1912,15 +1874,6 @@ impl ProcessManagerApp {
         }
     }
 
-    fn record_caption_probe(&mut self, elapsed: Duration) {
-        if self.toggles.diagnostics {
-            self.diagnostics.max_caption_probe_ms = self
-                .diagnostics
-                .max_caption_probe_ms
-                .max(elapsed.as_secs_f32() * 1000.0);
-        }
-    }
-
     fn record_viewport_motion(
         &mut self,
         viewport_pos: Option<Pos2>,
@@ -1993,16 +1946,6 @@ impl ProcessManagerApp {
             return Some(Duration::from_millis(100));
         }
 
-        if matches!(self.toggles.caption_sync, CaptionSyncMode::Continuous) {
-            return Some(Duration::from_secs(2));
-        }
-
-        if matches!(self.toggles.caption_sync, CaptionSyncMode::Startup)
-            && !self.caption_color_initialized
-        {
-            return Some(Duration::from_millis(250));
-        }
-
         if self
             .config
             .processes
@@ -2043,7 +1986,7 @@ impl ProcessManagerApp {
                 .map(|start| now.duration_since(start).as_secs_f32())
                 .unwrap_or_default();
             let line = format!(
-                "session={} uptime={uptime:.1}s updates={} slow_updates={} max_update_ms={:.2} max_snapshot_ms={:.2} max_caption_probe_ms={:.2} renderer={} backend={} adapter={} present={:?} vsync={} run_and_return={} caption_sync={:?} motion_fps={:.1} motion_updates={} move_events={} resize_events={}\n",
+                "session={} uptime={uptime:.1}s updates={} slow_updates={} max_update_ms={:.2} max_snapshot_ms={:.2} renderer={} backend={} adapter={} present={:?} vsync={} run_and_return={} motion_fps={:.1} motion_updates={} move_events={} resize_events={}\n",
                 diagnostics
                     .session_label
                     .as_deref()
@@ -2052,7 +1995,6 @@ impl ProcessManagerApp {
                 diagnostics.slow_updates,
                 diagnostics.max_update_ms,
                 diagnostics.max_snapshot_ms,
-                diagnostics.max_caption_probe_ms,
                 self.toggles.renderer.label(),
                 diagnostics
                     .renderer_backend
@@ -2065,7 +2007,6 @@ impl ProcessManagerApp {
                 self.toggles.present,
                 self.toggles.vsync,
                 self.toggles.run_and_return,
-                self.toggles.caption_sync,
                 diagnostics.last_motion_fps,
                 diagnostics.last_motion_updates,
                 diagnostics.last_motion_move_events,
@@ -2074,7 +2015,6 @@ impl ProcessManagerApp {
             append_diagnostics_line(&mut diagnostics.log_path, &line);
             diagnostics.max_update_ms = 0.0;
             diagnostics.max_snapshot_ms = 0.0;
-            diagnostics.max_caption_probe_ms = 0.0;
         }
     }
 
@@ -2115,7 +2055,6 @@ impl ProcessManagerApp {
                 ui.label(format!("present: {:?}", self.toggles.present));
                 ui.label(format!("vsync: {}", self.toggles.vsync));
                 ui.label(format!("run_and_return: {}", self.toggles.run_and_return));
-                ui.label(format!("caption_sync: {:?}", self.toggles.caption_sync));
                 ui.label(format!("uptime: {uptime:.1}s"));
                 ui.label(format!("updates: {}", self.diagnostics.updates));
                 ui.label(format!(
@@ -2139,71 +2078,13 @@ impl ProcessManagerApp {
             });
     }
 
-    fn refresh_shell_bg_from_windows_caption(&mut self, focused: bool) -> bool {
-        if self.toggles.caption_sync == CaptionSyncMode::Off {
-            return false;
-        }
-
-        if matches!(self.toggles.caption_sync, CaptionSyncMode::Startup)
-            && self.caption_color_initialized
-        {
-            self.last_focus_state = Some(focused);
-            return false;
-        }
-
-        let focus_changed = self
-            .last_focus_state
-            .map(|previous| previous != focused)
-            .unwrap_or(true);
-        self.last_focus_state = Some(focused);
-
-        if focus_changed && matches!(self.toggles.caption_sync, CaptionSyncMode::Continuous) {
-            self.next_caption_probe = Instant::now();
-        }
-
-        if Instant::now() < self.next_caption_probe {
-            return false;
-        }
-
-        let retry_delay = if self.caption_color_initialized {
-            match self.toggles.caption_sync {
-                CaptionSyncMode::Continuous => Duration::from_secs(2),
-                CaptionSyncMode::Startup => Duration::from_secs(60 * 60 * 24),
-                CaptionSyncMode::Off => Duration::from_secs(60 * 60 * 24),
-            }
-        } else {
-            Duration::from_millis(16)
-        };
-
-        self.next_caption_probe = Instant::now() + retry_delay;
-
-        let started = Instant::now();
-        #[cfg(windows)]
-        {
-            if let Some(color) = sample_windows_title_bar_color(&self.current_title) {
-                if !should_accept_caption_color(color) {
-                    self.record_caption_probe(started.elapsed());
-                    return false;
-                }
-                let changed = color != self.shell_bg;
-                self.shell_bg = color;
-                self.caption_color_initialized = true;
-                self.record_caption_probe(started.elapsed());
-                return changed;
-            }
-        }
-
-        self.record_caption_probe(started.elapsed());
-        false
-    }
-
     fn draw_header(&mut self, ctx: &Context) {
         let counts = self.runtime_snapshot.counts;
 
         TopBottomPanel::top("header")
             .frame(
                 egui::Frame::default()
-                    .fill(self.shell_bg)
+                    .fill(SHELL_BG)
                     .inner_margin(egui::Margin::symmetric(CONTENT_GUTTER_X, 10))
                     .stroke(Stroke::NONE),
             )
@@ -2379,7 +2260,7 @@ impl ProcessManagerApp {
             .max_width(SIDEBAR_MAX_WIDTH)
             .frame(
                 egui::Frame::default()
-                    .fill(self.shell_bg)
+                    .fill(SHELL_BG)
                     .inner_margin(egui::Margin::same(12))
                     .stroke(Stroke::NONE),
             )
@@ -2726,7 +2607,7 @@ impl ProcessManagerApp {
         CentralPanel::default()
             .frame(
                 egui::Frame::default()
-                    .fill(self.shell_bg)
+                    .fill(SHELL_BG)
                     .inner_margin(egui::Margin {
                         left: 0,
                         right: 0,
@@ -3226,7 +3107,7 @@ impl ProcessManagerApp {
                             }
                             if chrome_text_button(
                                 ui,
-                                "✕ Delete",
+                                "× Delete",
                                 TOOLBAR_RED,
                                 Vec2::new(0.0, 28.0),
                                 12.0,
@@ -3759,7 +3640,14 @@ impl ProcessManagerApp {
                                     draw_about_field(ui, &field);
                                     ui.add_space(10.0);
                                 }
-
+                                for (name, license) in [
+                                    ("Selawik font license", include_str!("../assets/fonts/Selawik-LICENSE.txt")),
+                                    ("Cascadia Mono font license", include_str!("../assets/fonts/Cascadia-LICENSE.txt")),
+                                ] {
+                                    ui.collapsing(name, |ui| {
+                                        ui.add(egui::Label::new(license).wrap());
+                                    });
+                                }
                             }
 
                             if let Some(error) = &self.rest_settings_error {
@@ -3955,7 +3843,7 @@ impl ProcessManagerApp {
             return;
         };
 
-        apply_windows_caption_theme(hwnd, self.shell_bg);
+        apply_windows_caption_theme(hwnd);
         self.native_caption_applied = true;
     }
 
@@ -4024,7 +3912,6 @@ impl eframe::App for ProcessManagerApp {
         self.update_title(ctx);
         self.ensure_windows_native_caption();
         self.ensure_windows_taskbar_icon();
-        let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
         let (viewport_pos, viewport_size) = ctx.input(|input| {
             let viewport = input.viewport();
             let viewport_pos = viewport.outer_rect.map(|rect| rect.min);
@@ -4049,21 +3936,12 @@ impl eframe::App for ProcessManagerApp {
         self.record_viewport_motion(viewport_pos, viewport_pos_changed, viewport_size_changed);
         self.last_viewport_size = Some(viewport_size);
 
-        let caption_changed = self.refresh_shell_bg_from_windows_caption(focused);
         self.handle_shortcuts(ctx);
         self.maybe_request_attention(ctx);
         self.sync_rest_config_reload();
         self.refresh_runtime_snapshot(false);
 
-        // Keep global panel_fill in sync with the live shell_bg from caption probe
-        ctx.style_mut(|style| {
-            style.visuals.panel_fill = self.shell_bg;
-            style.visuals.window_fill = PANEL_BG;
-            style.visuals.faint_bg_color = PANEL_BG;
-            style.visuals.extreme_bg_color = BODY_BG;
-        });
-
-        if caption_changed || viewport_pos_changed || viewport_size_changed {
+        if viewport_pos_changed || viewport_size_changed {
             ctx.request_repaint();
         }
         if let Some(delay) = self.next_repaint_delay() {
@@ -4104,7 +3982,40 @@ impl Drop for ProcessManagerApp {
     }
 }
 
+fn configure_fonts(ctx: &Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for (name, bytes, family) in [
+        (
+            "Selawik",
+            include_bytes!("../assets/fonts/Selawik.ttf").as_slice(),
+            egui::FontFamily::Proportional,
+        ),
+        (
+            "Cascadia Mono",
+            include_bytes!("../assets/fonts/CascadiaMono.ttf").as_slice(),
+            egui::FontFamily::Monospace,
+        ),
+    ] {
+        fonts
+            .font_data
+            .insert(name.into(), egui::FontData::from_static(bytes).into());
+        fonts
+            .families
+            .get_mut(&family)
+            .unwrap()
+            .insert(0, name.into());
+    }
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .unwrap()
+        .push("Cascadia Mono".into());
+    ctx.set_fonts(fonts);
+}
+
 fn configure_visuals(ctx: &Context) {
+    // Select the theme before styling it so OS theme events cannot replace our chrome.
+    ctx.set_theme(egui::Theme::Dark);
     let mut visuals = egui::Visuals::dark();
     // Do NOT set override_text_color — it prevents selected text from being visible
     visuals.panel_fill = SHELL_BG;
@@ -4135,8 +4046,76 @@ fn configure_visuals(ctx: &Context) {
     });
 }
 
+#[cfg(test)]
+mod appearance_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_fonts_cover_controls_and_keep_logs_monospace() {
+        let ctx = Context::default();
+        configure_fonts(&ctx);
+        configure_visuals(&ctx);
+
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut input = egui::RawInput::default();
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .native_pixels_per_point = Some(scale);
+            let _ = ctx.run(input, |ctx| {
+                assert_eq!(ctx.pixels_per_point(), scale);
+                ctx.fonts_mut(|fonts| {
+                    let missing: String = "Process Manager — ■ ▶ ▸ ▾ ⚙ × ⟳ 📋"
+                        .chars()
+                        .filter(|&c| !fonts.has_glyph(&FontId::proportional(13.5), c))
+                        .collect();
+                    assert!(missing.is_empty(), "Missing control glyphs: {missing}");
+                    let font = FontId::monospace(13.0);
+                    let width = fonts.glyph_width(&font, 'i');
+                    assert!(width > 0.0);
+                    for character in ['W', '0', ' '] {
+                        assert_eq!(fonts.glyph_width(&font, character), width);
+                    }
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn dark_appearance_survives_system_theme_changes() {
+        for initial_theme in [None, Some(egui::Theme::Light), Some(egui::Theme::Dark)] {
+            let ctx = Context::default();
+            let _ = ctx.run(
+                egui::RawInput {
+                    system_theme: initial_theme,
+                    ..Default::default()
+                },
+                |_| {},
+            );
+            configure_visuals(&ctx);
+            let expected = ctx.style();
+
+            for system_theme in [egui::Theme::Light, egui::Theme::Dark, egui::Theme::Light] {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        system_theme: Some(system_theme),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        let actual = ctx.style();
+                        assert_eq!(ctx.theme(), egui::Theme::Dark);
+                        assert_eq!(actual.visuals, expected.visuals);
+                        assert_eq!(actual.spacing, expected.spacing);
+                    },
+                );
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
-fn apply_windows_caption_theme(hwnd: windows_sys::Win32::Foundation::HWND, color: Color32) {
+fn apply_windows_caption_theme(hwnd: windows_sys::Win32::Foundation::HWND) {
     use std::ffi::c_void;
 
     use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
@@ -4148,15 +4127,11 @@ fn apply_windows_caption_theme(hwnd: windows_sys::Win32::Foundation::HWND, color
     const DWMWA_TEXT_COLOR: u32 = 36;
     const DWMWCP_ROUND: u32 = 2;
 
-    let dark_mode_enabled: i32 = (!is_light_color(color)) as i32;
+    let dark_mode_enabled: i32 = 1;
     let corner_preference = DWMWCP_ROUND;
     let border_color = color_to_colorref(BORDER);
-    let caption_color = color_to_colorref(color);
-    let text_color = color_to_colorref(if is_light_color(color) {
-        Color32::from_rgb(24, 24, 24)
-    } else {
-        Color32::from_rgb(237, 237, 237)
-    });
+    let caption_color = color_to_colorref(SHELL_BG);
+    let text_color = color_to_colorref(TEXT_MAIN);
 
     unsafe {
         let _ = DwmSetWindowAttribute(
@@ -4192,84 +4167,9 @@ fn apply_windows_caption_theme(hwnd: windows_sys::Win32::Foundation::HWND, color
     }
 }
 
-fn should_accept_caption_color(color: Color32) -> bool {
-    let r = color.r() as f32 / 255.0;
-    let g = color.g() as f32 / 255.0;
-    let b = color.b() as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let saturation = if max <= f32::EPSILON {
-        0.0
-    } else {
-        (max - min) / max
-    };
-
-    luminance < 0.24 || saturation > 0.12
-}
-
-fn is_light_color(color: Color32) -> bool {
-    let r = color.r() as f32 / 255.0;
-    let g = color.g() as f32 / 255.0;
-    let b = color.b() as f32 / 255.0;
-    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    luminance >= 0.5
-}
-
 #[cfg(windows)]
 fn color_to_colorref(color: Color32) -> u32 {
     (color.r() as u32) | ((color.g() as u32) << 8) | ((color.b() as u32) << 16)
-}
-
-fn configure_fonts(ctx: &Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    let mut loaded_segoe_ui = false;
-
-    if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/segoeui.ttf") {
-        fonts
-            .font_data
-            .insert("Segoe UI".into(), egui::FontData::from_owned(bytes).into());
-        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            family.insert(0, "Segoe UI".into());
-        }
-        loaded_segoe_ui = true;
-    }
-
-    // Segoe UI Symbol provides Unicode symbols and icons that Segoe UI lacks
-    if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/seguisym.ttf") {
-        fonts.font_data.insert(
-            "Segoe UI Symbol".into(),
-            egui::FontData::from_owned(bytes).into(),
-        );
-        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            family.push("Segoe UI Symbol".into());
-        }
-    }
-
-    let monospace_font = [
-        ("C:/Windows/Fonts/CascadiaMono.ttf", "Cascadia Mono"),
-        ("C:/Windows/Fonts/consola.ttf", "Consolas"),
-        ("C:/Windows/Fonts/lucon.ttf", "Lucida Console"),
-    ]
-    .into_iter()
-    .find_map(|(path, name)| {
-        std::fs::read(path)
-            .ok()
-            .map(|bytes| (name.to_string(), egui::FontData::from_owned(bytes)))
-    });
-
-    if let Some((name, font_data)) = monospace_font {
-        fonts.font_data.insert(name.clone(), font_data.into());
-        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            family.insert(0, name);
-        }
-    } else if loaded_segoe_ui {
-        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            family.insert(0, "Segoe UI".into());
-        }
-    }
-
-    ctx.set_fonts(fonts);
 }
 
 fn window_title(stack_name: &str) -> String {
@@ -5686,77 +5586,6 @@ fn append_diagnostics_line(log_path: &mut Option<PathBuf>, line: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(line.as_bytes());
     }
-}
-
-#[cfg(windows)]
-fn sample_windows_title_bar_color(window_title: &str) -> Option<Color32> {
-    use std::collections::HashMap;
-
-    use windows_sys::Win32::Foundation::RECT;
-    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
-
-    let hwnd = find_window_by_title(window_title)?;
-
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    let ok = unsafe { GetWindowRect(hwnd, &mut rect) };
-    if ok == 0 {
-        return None;
-    }
-
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-    if width < 320 || height < 80 {
-        return None;
-    }
-
-    let sample_y = rect.top + 12;
-    let sample_start = rect.left + 150;
-    let sample_end = rect.right - 190;
-    if sample_end <= sample_start {
-        return None;
-    }
-
-    let hdc = unsafe { GetDC(std::ptr::null_mut()) };
-    if hdc.is_null() {
-        return None;
-    }
-
-    let mut counts = HashMap::<u32, usize>::new();
-    let step = 12usize;
-
-    for x in (sample_start..sample_end).step_by(step) {
-        let pixel = unsafe { GetPixel(hdc, x, sample_y) };
-        if pixel == u32::MAX {
-            continue;
-        }
-
-        let r = (pixel & 0x0000_00FF) as u8;
-        let g = ((pixel & 0x0000_FF00) >> 8) as u8;
-        let b = ((pixel & 0x00FF_0000) >> 16) as u8;
-        let packed = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
-        *counts.entry(packed).or_insert(0) += 1;
-    }
-
-    unsafe {
-        ReleaseDC(std::ptr::null_mut(), hdc);
-    }
-
-    let packed = counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(packed, _)| packed)?;
-
-    let r = ((packed >> 16) & 0xFF) as u8;
-    let g = ((packed >> 8) & 0xFF) as u8;
-    let b = (packed & 0xFF) as u8;
-
-    Some(Color32::from_rgb(r, g, b))
 }
 
 #[cfg(windows)]
