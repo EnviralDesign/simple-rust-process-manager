@@ -1429,7 +1429,7 @@ impl ProcessManagerApp {
                 egui::pos2(slot.left, slot.y),
                 egui::pos2(slot.right, slot.y),
             ],
-            Stroke::new(1.5, color),
+            Stroke::new(1.5_f32, color),
         );
     }
 
@@ -2199,7 +2199,7 @@ impl ProcessManagerApp {
                         ui.painter().vline(
                             sep_rect.center().x,
                             sep_rect.y_range(),
-                            Stroke::new(1.0, Color32::from_white_alpha(15)),
+                            Stroke::new(1.0_f32, Color32::from_white_alpha(15)),
                         );
                         ui.add_space(4.0);
 
@@ -2710,7 +2710,7 @@ impl ProcessManagerApp {
                             ui.painter().vline(
                                 sep_rect.center().x,
                                 sep_rect.y_range(),
-                                Stroke::new(1.0, Color32::from_white_alpha(15)),
+                                Stroke::new(1.0_f32, Color32::from_white_alpha(15)),
                             );
                             ui.add_space(2.0);
                             if chrome_text_button(
@@ -2764,7 +2764,7 @@ impl ProcessManagerApp {
                 ui.painter().hline(
                     rect.x_range(),
                     rect.center().y,
-                    Stroke::new(1.0, Color32::from_white_alpha(10)),
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(10)),
                 );
             });
 
@@ -2856,7 +2856,7 @@ impl ProcessManagerApp {
                             ui.painter().vline(
                                 sep_rect.center().x,
                                 sep_rect.y_range(),
-                                Stroke::new(1.0, Color32::from_white_alpha(15)),
+                                Stroke::new(1.0_f32, Color32::from_white_alpha(15)),
                             );
                             ui.add_space(2.0);
                             if chrome_text_button(
@@ -2900,7 +2900,7 @@ impl ProcessManagerApp {
                 ui.painter().hline(
                     rect.x_range(),
                     rect.center().y,
-                    Stroke::new(1.0, Color32::from_white_alpha(10)),
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(10)),
                 );
             });
 
@@ -3090,7 +3090,7 @@ impl ProcessManagerApp {
                             ui.painter().vline(
                                 sep_rect.center().x,
                                 sep_rect.y_range(),
-                                Stroke::new(1.0, Color32::from_white_alpha(15)),
+                                Stroke::new(1.0_f32, Color32::from_white_alpha(15)),
                             );
                             ui.add_space(2.0);
                             if chrome_text_button(
@@ -3134,7 +3134,7 @@ impl ProcessManagerApp {
                 ui.painter().hline(
                     rect.x_range(),
                     rect.center().y,
-                    Stroke::new(1.0, Color32::from_white_alpha(10)),
+                    Stroke::new(1.0_f32, Color32::from_white_alpha(10)),
                 );
             });
 
@@ -3224,7 +3224,7 @@ impl ProcessManagerApp {
                 .frame(
                     egui::Frame::window(&ctx.style())
                         .fill(PANEL_BG)
-                        .stroke(Stroke::new(1.0, BORDER)),
+                        .stroke(Stroke::new(1.0_f32, BORDER)),
                 )
                 .open(&mut open)
                 .show(ctx, |ui| {
@@ -3451,7 +3451,7 @@ impl ProcessManagerApp {
                 .frame(
                     egui::Frame::window(&ctx.style())
                         .fill(PANEL_BG)
-                        .stroke(Stroke::new(1.0, BORDER)),
+                        .stroke(Stroke::new(1.0_f32, BORDER)),
                 )
                 .open(&mut open)
                 .show(ctx, |ui| {
@@ -3520,7 +3520,7 @@ impl ProcessManagerApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(PANEL_BG)
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, BORDER)),
             )
             .open(&mut open)
             .show(ctx, |ui| {
@@ -3554,7 +3554,7 @@ impl ProcessManagerApp {
                         ui.painter().hline(
                             rect.x_range(),
                             rect.center().y,
-                            Stroke::new(1.0, Color32::from_white_alpha(10)),
+                            Stroke::new(1.0_f32, Color32::from_white_alpha(10)),
                         );
                         ui.add_space(14.0);
 
@@ -3711,7 +3711,7 @@ impl ProcessManagerApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(PANEL_BG)
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, BORDER)),
             )
             .open(&mut open)
             .show(ctx, |ui| {
@@ -3765,7 +3765,7 @@ impl ProcessManagerApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(PANEL_BG)
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, BORDER)),
             )
             .open(&mut open)
             .show(ctx, |ui| {
@@ -4024,18 +4024,18 @@ fn configure_visuals(ctx: &Context) {
     visuals.faint_bg_color = PANEL_BG;
     visuals.widgets.noninteractive.bg_fill = SHELL_BG;
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_SOFT);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_SOFT);
     visuals.widgets.inactive.bg_fill = SHELL_BG;
     visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_MAIN);
     visuals.widgets.hovered.bg_fill = SHELL_HOVER_BG;
     visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT_MAIN);
     visuals.widgets.active.bg_fill = SHELL_ACTIVE_BG;
     visuals.widgets.active.bg_stroke = Stroke::NONE;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT_MAIN);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, TEXT_MAIN);
     visuals.selection.bg_fill = Color32::from_rgb(56, 98, 158);
-    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(86, 136, 198));
+    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(86, 136, 198));
     visuals.window_shadow.color = Color32::TRANSPARENT;
     ctx.set_visuals(visuals);
 
@@ -4209,7 +4209,7 @@ fn about_fields() -> Vec<AboutField> {
 fn draw_about_field(ui: &mut Ui, field: &AboutField) {
     egui::Frame::default()
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .stroke(Stroke::new(1.0_f32, FIELD_BORDER))
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -4308,16 +4308,16 @@ fn chrome_text_button(
         let visuals = &mut ui.style_mut().visuals;
         visuals.widgets.inactive.bg_fill = SHELL_BG;
         visuals.widgets.inactive.bg_stroke = if show_idle_stroke {
-            Stroke::new(1.0, SHELL_STROKE)
+            Stroke::new(1.0_f32, SHELL_STROKE)
         } else {
             Stroke::NONE
         };
         visuals.widgets.hovered.bg_fill = SHELL_HOVER_BG;
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, SHELL_STROKE);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, SHELL_STROKE);
         visuals.widgets.active.bg_fill = SHELL_ACTIVE_BG;
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0, SHELL_STROKE);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, SHELL_STROKE);
         visuals.widgets.open.bg_fill = SHELL_ACTIVE_BG;
-        visuals.widgets.open.bg_stroke = Stroke::new(1.0, SHELL_STROKE);
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, SHELL_STROKE);
 
         ui.add(
             Button::new(RichText::new(label).color(text_color).size(font_size))
@@ -4492,7 +4492,7 @@ fn draw_process_row(
         ui.painter().rect_stroke(
             rect,
             4.0,
-            Stroke::new(1.0, stroke_color),
+            Stroke::new(1.0_f32, stroke_color),
             egui::StrokeKind::Outside,
         );
     }
@@ -4849,13 +4849,13 @@ fn modal_text_edit(ui: &mut Ui, value: &mut String, hint: &str, width: f32) -> e
     ui.scope(|ui| {
         let visuals = &mut ui.style_mut().visuals;
         visuals.widgets.inactive.bg_fill = FIELD_BG;
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, FIELD_BORDER);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER);
         visuals.widgets.hovered.bg_fill = FIELD_BG_HOVER;
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, FIELD_BORDER_FOCUS);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER_FOCUS);
         visuals.widgets.active.bg_fill = FIELD_BG_HOVER;
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0, FIELD_BORDER_FOCUS);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER_FOCUS);
         visuals.widgets.open.bg_fill = FIELD_BG_HOVER;
-        visuals.widgets.open.bg_stroke = Stroke::new(1.0, FIELD_BORDER_FOCUS);
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER_FOCUS);
 
         ui.add_sized(
             [width, 34.0],
@@ -4872,8 +4872,8 @@ fn modal_disabled_text_edit(ui: &mut Ui, value: &mut String, width: f32) -> egui
     ui.scope(|ui| {
         let visuals = &mut ui.style_mut().visuals;
         visuals.widgets.noninteractive.bg_fill = FIELD_BG;
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, FIELD_BORDER_DISABLED);
-        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_MUTED);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER_DISABLED);
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_MUTED);
 
         ui.add_enabled_ui(false, |ui| {
             ui.add_sized(
@@ -4919,14 +4919,14 @@ fn modal_divider(ui: &mut Ui) {
     ui.painter().hline(
         rect.x_range(),
         rect.center().y,
-        Stroke::new(1.0, SHELL_SUBTLE_STROKE),
+        Stroke::new(1.0_f32, SHELL_SUBTLE_STROKE),
     );
 }
 
 fn draw_restart_schedule_summary(ui: &mut Ui, form: &mut ProcessDraft) {
     egui::Frame::default()
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .stroke(Stroke::new(1.0_f32, FIELD_BORDER))
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -4956,7 +4956,7 @@ fn draw_restart_schedule_summary(ui: &mut Ui, form: &mut ProcessDraft) {
 fn draw_scheduled_run_summary(ui: &mut Ui, form: &mut ProcessDraft) {
     egui::Frame::default()
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .stroke(Stroke::new(1.0_f32, FIELD_BORDER))
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -4979,7 +4979,7 @@ fn draw_scheduled_run_summary(ui: &mut Ui, form: &mut ProcessDraft) {
 fn draw_stack_control_group(ui: &mut Ui, form: &mut ProcessDraft) {
     egui::Frame::default()
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, FIELD_BORDER))
+        .stroke(Stroke::new(1.0_f32, FIELD_BORDER))
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -5005,7 +5005,7 @@ fn draw_process_schedule_editors(ctx: &Context, form: &mut ProcessDraft) {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(PANEL_BG)
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, BORDER)),
             )
             .open(&mut open)
             .show(ctx, |ui| {
@@ -5079,7 +5079,7 @@ fn draw_process_schedule_editors(ctx: &Context, form: &mut ProcessDraft) {
                                                     FIELD_BG
                                                 })
                                                 .stroke(Stroke::new(
-                                                    1.0,
+                                                    1.0_f32,
                                                     if enabled {
                                                         TAB_SELECTED_STROKE
                                                     } else {
@@ -5112,7 +5112,7 @@ fn draw_process_schedule_editors(ctx: &Context, form: &mut ProcessDraft) {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(PANEL_BG)
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .stroke(Stroke::new(1.0_f32, BORDER)),
             )
             .open(&mut open)
             .show(ctx, |ui| {
@@ -5201,7 +5201,7 @@ where
             let visuals = &mut ui.style_mut().visuals;
             visuals.widgets.inactive.bg_fill = if selected { TAB_SELECTED_BG } else { SHELL_BG };
             visuals.widgets.inactive.bg_stroke = Stroke::new(
-                1.0,
+                1.0_f32,
                 if selected {
                     TAB_SELECTED_STROKE
                 } else {
@@ -5214,7 +5214,7 @@ where
                 SHELL_HOVER_BG
             };
             visuals.widgets.hovered.bg_stroke = Stroke::new(
-                1.0,
+                1.0_f32,
                 if selected {
                     TAB_SELECTED_STROKE
                 } else {
@@ -5222,9 +5222,9 @@ where
                 },
             );
             visuals.widgets.active.bg_fill = TAB_SELECTED_ACTIVE_BG;
-            visuals.widgets.active.bg_stroke = Stroke::new(1.0, TAB_SELECTED_STROKE);
+            visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, TAB_SELECTED_STROKE);
             visuals.widgets.open.bg_fill = TAB_SELECTED_ACTIVE_BG;
-            visuals.widgets.open.bg_stroke = Stroke::new(1.0, TAB_SELECTED_STROKE);
+            visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, TAB_SELECTED_STROKE);
 
             ui.add(
                 Button::new(
@@ -5260,15 +5260,15 @@ fn modal_checkbox_row(
                 |ui| {
                     let visuals = &mut ui.style_mut().visuals;
                     visuals.widgets.inactive.bg_fill = FIELD_BG;
-                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, FIELD_BORDER);
+                    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER);
                     visuals.widgets.hovered.bg_fill = FIELD_BG_HOVER;
-                    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, FIELD_BORDER_FOCUS);
+                    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER_FOCUS);
                     visuals.widgets.active.bg_fill = FIELD_BG_HOVER;
-                    visuals.widgets.active.bg_stroke = Stroke::new(1.0, FIELD_BORDER_FOCUS);
+                    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, FIELD_BORDER_FOCUS);
 
                     egui::Frame::default()
                         .fill(Color32::TRANSPARENT)
-                        .stroke(Stroke::new(1.0, FIELD_BORDER))
+                        .stroke(Stroke::new(1.0_f32, FIELD_BORDER))
                         .corner_radius(8.0)
                         .inner_margin(egui::Margin::symmetric(12, 10))
                         .show(ui, |ui| {
@@ -5298,7 +5298,7 @@ fn modal_footer(ui: &mut Ui, add_actions: impl FnOnce(&mut Ui)) {
     ui.painter().hline(
         footer_rect.x_range(),
         footer_rect.top(),
-        Stroke::new(1.0, SHELL_SUBTLE_STROKE),
+        Stroke::new(1.0_f32, SHELL_SUBTLE_STROKE),
     );
 
     let actions_rect = footer_rect.shrink2(egui::vec2(12.0, 14.0));
