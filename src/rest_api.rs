@@ -75,15 +75,6 @@ impl RestServerSnapshot {
             message: Some(message.into()),
         }
     }
-
-    pub fn status_label(&self) -> &'static str {
-        match self.state {
-            RestServerState::Disabled => "Off",
-            RestServerState::Starting => "Starting",
-            RestServerState::Running => "On",
-            RestServerState::Error => "Error",
-        }
-    }
 }
 
 struct ActiveServer {
@@ -131,10 +122,6 @@ impl RestServerController {
             snapshot_tx,
             config_reload_tx,
         }
-    }
-
-    pub fn snapshot(&self) -> RestServerSnapshot {
-        self.snapshot_tx.borrow().clone()
     }
 
     pub fn config_reload_event(&self) -> ConfigReloadEvent {
@@ -1009,7 +996,6 @@ fn format_optional_bytes(value: Option<u64>) -> String {
 pub fn build_agent_bootstrap(
     stack_name: &str,
     remote_control: &RemoteControlConfig,
-    snapshot: &RestServerSnapshot,
     processes: &[ProcessRuntimeSnapshot],
     groups: &[ProcessGroupConfig],
 ) -> String {
@@ -1019,8 +1005,8 @@ pub fn build_agent_bootstrap(
         format!("Host: {}", REST_HOST),
         format!("Port: {}", remote_control.port),
         format!("Base URL: http://{}:{}", REST_HOST, remote_control.port),
-        format!("Current REST status: {}", snapshot.status_label()),
         "Scope: loopback-only (127.0.0.1); this API is not exposed to the network.".to_string(),
+        "The runtime details in this copied text are a snapshot and may be stale. Before reporting current state or taking action, check GET /health, GET /processes, and GET /groups. GET /health is the source of truth for API reachability. If it cannot be reached, check that Local API is enabled in Global Settings and confirm the host and port above; a failed request alone does not establish that the API is disabled.".to_string(),
         String::new(),
         "Usage".to_string(),
         "1. Call GET /health to confirm the server is reachable.".to_string(),
@@ -1061,7 +1047,7 @@ pub fn build_agent_bootstrap(
         "- POST /processes/{id}/restart".to_string(),
         "- POST /processes/{id}/reload".to_string(),
         String::new(),
-        "Known Groups".to_string(),
+        "Known Groups (snapshot; refresh with GET /groups)".to_string(),
     ];
 
     if groups.is_empty() {
@@ -1082,7 +1068,10 @@ pub fn build_agent_bootstrap(
         }
     }
 
-    lines.extend([String::new(), "Known Processes".to_string()]);
+    lines.extend([
+        String::new(),
+        "Known Processes (snapshot; refresh with GET /processes)".to_string(),
+    ]);
 
     if processes.is_empty() {
         lines.push("- No managed processes are configured yet.".to_string());
@@ -1108,41 +1097,25 @@ pub fn build_agent_bootstrap(
     }
 
     lines.push(String::new());
-    if !remote_control.enabled {
-        lines.push(
-            "Note: the local REST server is currently disabled. Ask the operator to enable Local API in the Process Manager header before calling it."
-                .to_string(),
-        );
-    } else if snapshot.state == RestServerState::Error {
-        lines.push(format!(
-            "Note: the API is configured as enabled but is currently reporting an error: {}",
-            snapshot
-                .message
-                .clone()
-                .unwrap_or_else(|| "unknown error".to_string())
-        ));
-    } else {
-        lines.push(
-            "Note: target individual components by stable id rather than by display name."
-                .to_string(),
-        );
-        lines.push(
-            "Note: target groups by stable group id; call GET /groups when you need the current group list."
-                .to_string(),
-        );
-        lines.push(
-            "Note: regroup by editing the groups array in processes.json, then call POST /stack/reload."
-                .to_string(),
-        );
-        lines.push(
-            "Note: POST /processes/{id}/reload updates only that process from processes.json."
-                .to_string(),
-        );
-        lines.push(
-            "Note: stack reload (POST /stack/reload) stops all managed processes first, regardless of status or stack-control settings."
-                .to_string(),
-        );
-    }
+    lines.push(
+        "Note: target individual components by stable id rather than by display name.".to_string(),
+    );
+    lines.push(
+        "Note: target groups by stable group id; call GET /groups when you need the current group list."
+            .to_string(),
+    );
+    lines.push(
+        "Note: regroup by editing the groups array in processes.json, then call POST /stack/reload."
+            .to_string(),
+    );
+    lines.push(
+        "Note: POST /processes/{id}/reload updates only that process from processes.json."
+            .to_string(),
+    );
+    lines.push(
+        "Note: stack reload (POST /stack/reload) stops all managed processes first, regardless of status or stack-control settings."
+            .to_string(),
+    );
 
     lines.join("\n")
 }

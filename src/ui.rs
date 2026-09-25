@@ -25,7 +25,7 @@ use crate::log_classification::contains_error_indicator;
 use crate::process_manager::{
     ProcessCounts, ProcessManager, ProcessResourceUsage, ProcessStatus, UiRuntimeSnapshot,
 };
-use crate::rest_api::{build_agent_bootstrap, RestServerController, RestServerSnapshot};
+use crate::rest_api::{build_agent_bootstrap, RestServerController};
 
 const SHELL_BG: Color32 = Color32::from_rgb(32, 32, 36); // Fixed shell / native caption chrome
 const BODY_BG: Color32 = Color32::from_rgb(24, 24, 24); // Content inset — neutral gray like Codex main pane
@@ -827,10 +827,6 @@ impl ProcessManagerApp {
         self.last_process_error_versions = current_versions;
     }
 
-    fn rest_snapshot(&self) -> RestServerSnapshot {
-        self.rest_controller.snapshot()
-    }
-
     fn ensure_valid_selection(&mut self) {
         let valid_process_ids: HashSet<String> = self
             .config
@@ -1099,7 +1095,6 @@ impl ProcessManagerApp {
         let payload = build_agent_bootstrap(
             &self.config.stack_name,
             &self.config.remote_control,
-            &self.rest_snapshot(),
             &self.manager.list_processes(),
             &self.config.groups,
         );
