@@ -1,7 +1,7 @@
 # Rust build artifacts
 /target/
+/dist/
 **/*.rs.bk
-Cargo.lock
 
 # IDE
 .idea/

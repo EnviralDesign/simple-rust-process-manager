@@ -482,7 +482,7 @@ pub struct AppConfig {
     /// Optional localhost REST control server settings
     #[serde(default)]
     pub remote_control: RemoteControlConfig,
-    /// Base directory for persisted process logs. Relative paths resolve next to the executable.
+    /// Base directory for persisted process logs. Relative paths resolve beside processes.json.
     #[serde(default = "default_log_directory")]
     pub log_directory: String,
     /// How long the Processes sidebar softly flashes after a new error arrives. Set to 0 to disable.
@@ -521,13 +521,9 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Get the path to the config file (next to the executable)
+    /// Config lives beside a portable binary/app, or in Application Support for an installed Mac app.
     pub fn config_path() -> PathBuf {
-        let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-        let exe_dir = exe_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        exe_dir.join("processes.json")
+        crate::platform::data_directory().join("processes.json")
     }
 
     /// Load config from file, creating default if not found or if parsing fails.
@@ -614,6 +610,10 @@ impl AppConfig {
     /// Save config to file
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config directory: {e}"))?;
+        }
         self.save_to_path(&path)
     }
 
