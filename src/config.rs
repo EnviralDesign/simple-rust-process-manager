@@ -482,7 +482,7 @@ pub struct AppConfig {
     /// Optional localhost REST control server settings
     #[serde(default)]
     pub remote_control: RemoteControlConfig,
-    /// Base directory for persisted process logs. Relative paths resolve next to the executable.
+    /// Base directory for persisted process logs. Relative paths resolve beside processes.json.
     #[serde(default = "default_log_directory")]
     pub log_directory: String,
     /// How long the Processes sidebar softly flashes after a new error arrives. Set to 0 to disable.
@@ -521,7 +521,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Config lives beside a portable binary or in Application Support for a Mac app.
+    /// Config lives beside a portable binary/app, or in Application Support for an installed Mac app.
     pub fn config_path() -> PathBuf {
         crate::platform::data_directory().join("processes.json")
     }

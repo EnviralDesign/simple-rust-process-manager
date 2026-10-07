@@ -8,10 +8,16 @@ pub fn data_directory() -> PathBuf {
 
 fn data_directory_for(executable: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
-    if is_app_bundle(executable) {
-        if let Some(directory) = dirs::data_local_dir() {
-            return directory.join("Simple Rust Process Manager");
+    if let Some(bundle) = app_bundle(executable) {
+        if is_installed_app(bundle, dirs::home_dir().as_deref()) {
+            if let Some(directory) = dirs::data_local_dir() {
+                return directory.join("Simple Rust Process Manager");
+            }
         }
+        return bundle
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
     }
     executable
         .parent()
@@ -20,14 +26,22 @@ fn data_directory_for(executable: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn is_app_bundle(executable: &Path) -> bool {
+fn app_bundle(executable: &Path) -> Option<&Path> {
     executable
         .parent()
         .filter(|p| p.file_name().is_some_and(|n| n == "MacOS"))
         .and_then(Path::parent)
         .filter(|p| p.file_name().is_some_and(|n| n == "Contents"))
         .and_then(Path::parent)
-        .is_some_and(|p| p.extension().is_some_and(|e| e == "app"))
+        .filter(|p| p.extension().is_some_and(|e| e == "app"))
+}
+
+#[cfg(target_os = "macos")]
+fn is_installed_app(bundle: &Path, home: Option<&Path>) -> bool {
+    bundle.starts_with("/Applications")
+        || bundle.starts_with("/System/Applications")
+        || bundle.starts_with("/System/Volumes/Data/Applications")
+        || home.is_some_and(|home| bundle.starts_with(home.join("Applications")))
 }
 
 pub fn initialize() {
@@ -199,16 +213,37 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn bundle_data_is_outside_application() {
-        let executable = Path::new("/Applications/Process Manager.app/Contents/MacOS/manager");
-        assert!(is_app_bundle(executable));
-        assert_eq!(
-            data_directory_for(executable),
-            dirs::data_local_dir()
-                .unwrap()
-                .join("Simple Rust Process Manager")
-        );
-        assert!(!is_app_bundle(Path::new("/tmp/Contents/MacOS/manager")));
+    fn portable_bundles_keep_each_stacks_data_beside_the_app() {
+        for directory in [
+            "/tmp/stacks/A",
+            "/tmp/stacks/B",
+            "/tmp/Applications",
+            "/Applications Backup",
+        ] {
+            let executable =
+                Path::new(directory).join("Renamed Manager.app/Contents/MacOS/manager");
+            assert_eq!(data_directory_for(&executable), PathBuf::from(directory));
+        }
+        assert!(app_bundle(Path::new("/tmp/Contents/MacOS/manager")).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_bundles_use_application_support() {
+        let mut directories = vec![
+            PathBuf::from("/Applications"),
+            PathBuf::from("/Applications/Tools"),
+            PathBuf::from("/System/Applications"),
+            PathBuf::from("/System/Volumes/Data/Applications"),
+        ];
+        directories.push(dirs::home_dir().unwrap().join("Applications"));
+        let expected = dirs::data_local_dir()
+            .unwrap()
+            .join("Simple Rust Process Manager");
+        for directory in directories {
+            let executable = directory.join("Process Manager.app/Contents/MacOS/manager");
+            assert_eq!(data_directory_for(&executable), expected);
+        }
     }
 
     #[cfg(target_os = "macos")]

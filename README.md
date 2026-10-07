@@ -118,7 +118,7 @@ This panel controls:
 
 ### Configuration Without Friction
 
-- Store config in a portable `processes.json` next to the executable, or in Application Support when running a Mac `.app`.
+- Store config in a portable `processes.json` next to the executable or Mac `.app`; Mac apps installed in Applications use Application Support.
 - Edit existing entries in place.
 - Edit one-layer groups in the top-level `groups` array alongside `processes`.
 - Persist logs to disk per process, with configurable retention.
@@ -165,15 +165,21 @@ Create a native app and distribution ZIP:
 open "dist/Process Manager.app"
 ```
 
-The script produces `dist/Process Manager.app` and a versioned, architecture-specific ZIP. Copy the app to Applications to install it. The bundle declares macOS 12 or newer; the workflow tests current macOS runners, while macOS 12 itself still requires device validation.
+The script produces `dist/Process Manager.app` and a versioned, architecture-specific ZIP. Run the app directly from your stack folder for portable use. The bundle declares macOS 12 or newer; the workflow tests current macOS runners, while macOS 12 itself still requires device validation.
 
-When using the app bundle:
+The Mac app follows the Windows portable layout by default:
 
-- Config: `~/Library/Application Support/Simple Rust Process Manager/processes.json`
-- Default logs: `~/Library/Application Support/Simple Rust Process Manager/Process Manager logs/`
-- Diagnostics, when enabled: `~/Library/Application Support/Simple Rust Process Manager/process-manager-diagnostics.log`
-- Relative log paths resolve from that same configuration directory. Moving/updating the app preserves this data.
-- Existing portable configurations can be copied into that directory while the app is closed.
+- Config: `processes.json` beside `Process Manager.app` (for example, `dist/processes.json`).
+- Default logs: `Process Manager logs/` beside the app.
+- Diagnostics, when enabled: `process-manager-diagnostics.log` beside the app.
+- Relative log paths resolve from that same configuration directory.
+- To run independent stacks, put a copy of the app and its `processes.json` in each stack's folder. Give each instance a different local API port if the API is enabled. App copies in the same folder share that folder's configuration, matching Windows executables.
+- Moving a portable app means moving its configuration/logs with it. Updating the app in place preserves the adjacent configuration.
+- If the app is placed under `/Applications`, `~/Applications`, or `/System/Applications`, config and default logs instead use `~/Library/Application Support/Simple Rust Process Manager/`. Installed copies share that directory.
+- If you used the earlier Mac build's shared Application Support config, copy that `processes.json` beside the portable app while the app is closed. New portable copies do not automatically import a shared stack.
+
+Other Mac behavior:
+
 - Finder launches recover PATH from your configured interactive login shell, with Homebrew, `~/.local/bin`, and `~/.cargo/bin` fallbacks. Shell initialization has a three-second timeout. The command field does not expand `$VARIABLE` or `~`; use full paths or an explicit shell when needed.
 - Keyboard shortcuts use Command on macOS and Ctrl on Windows.
 - CPU/RAM totals include members of the managed process group. CPU percentage is normalized across logical processors, matching Windows.
@@ -253,7 +259,7 @@ Executable scripts need a shebang and execute permissions, or an explicit interp
 
 ## Configuration
 
-The app stores configuration in `processes.json`. Portable binaries use the directory beside the executable; the macOS `.app` uses `~/Library/Application Support/Simple Rust Process Manager/`.
+The app stores configuration in `processes.json`. Portable binaries and Mac apps use the directory beside the executable or `.app`. Mac apps placed in Applications use `~/Library/Application Support/Simple Rust Process Manager/`.
 
 Example:
 
