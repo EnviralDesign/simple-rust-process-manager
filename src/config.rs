@@ -521,13 +521,9 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Get the path to the config file (next to the executable)
+    /// Config lives beside a portable binary or in Application Support for a Mac app.
     pub fn config_path() -> PathBuf {
-        let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-        let exe_dir = exe_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        exe_dir.join("processes.json")
+        crate::platform::data_directory().join("processes.json")
     }
 
     /// Load config from file, creating default if not found or if parsing fails.
@@ -614,6 +610,10 @@ impl AppConfig {
     /// Save config to file
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config directory: {e}"))?;
+        }
         self.save_to_path(&path)
     }
 

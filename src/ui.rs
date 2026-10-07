@@ -1820,19 +1820,22 @@ impl ProcessManagerApp {
         let mut clear_logs = false;
 
         ctx.input(|input| {
-            if input.modifiers.ctrl && input.key_pressed(Key::N) {
+            if input.modifiers.command && input.key_pressed(Key::N) {
                 open_add = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::S) {
+            if input.modifiers.command && input.key_pressed(Key::S) {
                 start_all = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::X) {
+            if input.modifiers.command && input.key_pressed(Key::X) {
                 stop_all = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::R) {
+            if input.modifiers.command && input.key_pressed(Key::R) {
                 restart_all = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::C) && self.frozen_log_line.is_none() {
+            if input.modifiers.command
+                && input.key_pressed(Key::C)
+                && self.frozen_log_line.is_none()
+            {
                 copy_logs = true;
             }
             if input.key_pressed(Key::Escape) {
@@ -3577,7 +3580,7 @@ impl ProcessManagerApp {
                                 ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(
-                                        "Process Manager creates 'Process Manager logs' here. '.' resolves next to the executable.",
+                                        "Process Manager creates 'Process Manager logs' here. '.' resolves beside processes.json.",
                                     )
                                     .color(TEXT_MUTED)
                                     .size(11.5),
@@ -4043,6 +4046,13 @@ fn configure_visuals(ctx: &Context) {
 
 #[cfg(test)]
 mod appearance_tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_renderer_has_a_native_backend() {
+        assert!(eframe::wgpu::Instance::enabled_backend_features()
+            .contains(eframe::wgpu::Backends::METAL));
+    }
+
     use super::*;
 
     #[test]
@@ -5571,11 +5581,7 @@ fn blend_color(base: Color32, overlay: Color32, amount: f32) -> Color32 {
 
 fn append_diagnostics_line(log_path: &mut Option<PathBuf>, line: &str) {
     let path = log_path.get_or_insert_with(|| {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-        exe_dir.join("process-manager-diagnostics.log")
+        crate::platform::data_directory().join("process-manager-diagnostics.log")
     });
 
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
