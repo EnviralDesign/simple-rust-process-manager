@@ -6,12 +6,19 @@ mod process_manager;
 mod rest_api;
 mod ui;
 
-fn main() -> eframe::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     if normalize_config_from_args() {
         return Ok(());
     }
 
-    ui::run()
+    let exe_path = std::env::current_exe()?;
+    let exe_directory = exe_path.parent().ok_or_else(|| {
+        std::io::Error::other("Process Manager executable has no parent directory")
+    })?;
+    std::env::set_current_dir(exe_directory)?;
+
+    ui::run()?;
+    Ok(())
 }
 
 fn normalize_config_from_args() -> bool {
