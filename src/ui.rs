@@ -446,7 +446,10 @@ impl RestSettingsForm {
             enabled: config.remote_control.enabled,
             port: config.remote_control.port.to_string(),
             log_directory: config.log_directory.clone(),
-            log_directory_suggestion: RelativePathSuggestion::default(),
+            log_directory_suggestion: RelativePathSuggestion {
+                base_directory: Some(crate::platform::data_directory()),
+                ..Default::default()
+            },
             process_error_flash_seconds: config.process_error_flash_seconds.to_string(),
         }
     }
@@ -1825,19 +1828,22 @@ impl ProcessManagerApp {
         let mut clear_logs = false;
 
         ctx.input(|input| {
-            if input.modifiers.ctrl && input.key_pressed(Key::N) {
+            if input.modifiers.command && input.key_pressed(Key::N) {
                 open_add = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::S) {
+            if input.modifiers.command && input.key_pressed(Key::S) {
                 start_all = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::X) {
+            if input.modifiers.command && input.key_pressed(Key::X) {
                 stop_all = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::R) {
+            if input.modifiers.command && input.key_pressed(Key::R) {
                 restart_all = true;
             }
-            if input.modifiers.ctrl && input.key_pressed(Key::C) && self.frozen_log_line.is_none() {
+            if input.modifiers.command
+                && input.key_pressed(Key::C)
+                && self.frozen_log_line.is_none()
+            {
                 copy_logs = true;
             }
             if input.key_pressed(Key::Escape) {
@@ -3579,7 +3585,7 @@ impl ProcessManagerApp {
                                 ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(
-                                        "Process Manager creates 'Process Manager logs' here. '.' resolves next to the executable.",
+                                        "Process Manager creates 'Process Manager logs' here. '.' resolves beside processes.json.",
                                     )
                                     .color(TEXT_MUTED)
                                     .size(11.5),
@@ -4039,6 +4045,13 @@ fn configure_visuals(ctx: &Context) {
 
 #[cfg(test)]
 mod appearance_tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_renderer_has_a_native_backend() {
+        assert!(eframe::wgpu::Instance::enabled_backend_features()
+            .contains(eframe::wgpu::Backends::METAL));
+    }
+
     use super::*;
 
     #[test]
@@ -4882,6 +4895,7 @@ fn modal_disabled_text_edit(ui: &mut Ui, value: &mut String, width: f32) -> egui
 
 #[derive(Clone, Default)]
 struct RelativePathSuggestion {
+    base_directory: Option<PathBuf>,
     checked_value: Option<String>,
     pending: Option<Arc<OnceLock<Option<String>>>>,
     relative: Option<String>,
@@ -4901,10 +4915,16 @@ impl RelativePathSuggestion {
                     let result = Arc::new(OnceLock::new());
                     self.pending = Some(result.clone());
                     let ctx = ctx.clone();
+                    let base_directory = self.base_directory.clone();
                     std::thread::spawn(move || {
-                        let relative = std::env::current_exe()
-                            .ok()
-                            .and_then(|exe| relative_path(exe.parent()?, &path))
+                        let relative = base_directory
+                            .or_else(|| {
+                                std::env::current_exe()
+                                    .ok()?
+                                    .parent()
+                                    .map(Path::to_path_buf)
+                            })
+                            .and_then(|base| relative_path(&base, &path))
                             .and_then(|path| path.into_os_string().into_string().ok());
                         let _ = result.set(relative);
                         ctx.request_repaint();
@@ -4996,9 +5016,7 @@ fn modal_path_edit(
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if shell_button(ui, "Use relative path")
-                .on_hover_text(format!(
-                    "Relative to the Process Manager EXE folder:\n{relative}"
-                ))
+                .on_hover_text(format!("Replace with this relative path:\n{relative}"))
                 .clicked()
             {
                 *value = relative.clone();
@@ -5092,31 +5110,42 @@ mod relative_path_tests {
             .unwrap()
             .to_path_buf();
         let value = format!("\"{}\"", base.join("service files").display());
-        let mut suggestion = RelativePathSuggestion::default();
-        suggestion.update(&value, false, &ctx);
-        assert!(suggestion.pending.is_none());
-        suggestion.update(&value, true, &ctx);
-        let pending = suggestion.pending.clone().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while pending.get().is_none() {
-            assert!(Instant::now() < deadline, "Path check did not finish");
-            std::thread::sleep(Duration::from_millis(5));
+        for (base_directory, expected) in [
+            (None, PathBuf::from("service files")),
+            (
+                Some(base.join("config")),
+                PathBuf::from("..").join("service files"),
+            ),
+        ] {
+            let mut suggestion = RelativePathSuggestion {
+                base_directory,
+                ..Default::default()
+            };
+            suggestion.update(&value, false, &ctx);
+            assert!(suggestion.pending.is_none());
+            suggestion.update(&value, true, &ctx);
+            let pending = suggestion.pending.clone().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while pending.get().is_none() {
+                assert!(Instant::now() < deadline, "Path check did not finish");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            suggestion.update(&value, true, &ctx);
+            assert_eq!(suggestion.relative.as_deref(), expected.to_str());
+
+            suggestion.relative = None;
+            suggestion.update(&value, true, &ctx);
+            assert!(
+                suggestion.relative.is_none(),
+                "Dismissed suggestion returned"
+            );
+            assert!(suggestion.pending.is_none());
+
+            suggestion.pending = Some(pending);
+            suggestion.update("different value being typed", false, &ctx);
+            assert!(suggestion.relative.is_none());
+            assert!(suggestion.pending.is_none());
         }
-        suggestion.update(&value, true, &ctx);
-        assert_eq!(suggestion.relative.as_deref(), Some("service files"));
-
-        suggestion.relative = None;
-        suggestion.update(&value, true, &ctx);
-        assert!(
-            suggestion.relative.is_none(),
-            "Dismissed suggestion returned"
-        );
-        assert!(suggestion.pending.is_none());
-
-        suggestion.pending = Some(pending);
-        suggestion.update("different value being typed", false, &ctx);
-        assert!(suggestion.relative.is_none());
-        assert!(suggestion.pending.is_none());
     }
 
     #[test]
@@ -5840,11 +5869,7 @@ fn blend_color(base: Color32, overlay: Color32, amount: f32) -> Color32 {
 
 fn append_diagnostics_line(log_path: &mut Option<PathBuf>, line: &str) {
     let path = log_path.get_or_insert_with(|| {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-        exe_dir.join("process-manager-diagnostics.log")
+        crate::platform::data_directory().join("process-manager-diagnostics.log")
     });
 
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {

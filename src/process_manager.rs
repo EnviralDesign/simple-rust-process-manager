@@ -561,6 +561,18 @@ impl ProcessManager {
 
                     {
                         let mut processes = processes_arc.lock().unwrap();
+                        if !processes.get(&id_owned).is_some_and(|state| {
+                            start_request_is_current_state(state, start_generation)
+                        }) {
+                            // Stop/shutdown may have arrived between validation and spawn.
+                            // Do not publish an already-cancelled child into the managed set.
+                            #[cfg(unix)]
+                            let _ = crate::platform::stop_process_group(&mut child);
+                            #[cfg(not(unix))]
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return;
+                        }
                         if let Some(state) = processes.get_mut(&id_owned) {
                             state.status = ProcessStatus::Running;
                             state.disk_log = disk_log.clone();
@@ -724,9 +736,18 @@ impl ProcessManager {
                             {
                                 let mut processes = processes_monitor.lock().unwrap();
                                 if let Some(state) = processes.get_mut(&id_monitor) {
+                                    if state.start_generation != start_generation {
+                                        break;
+                                    }
                                     if let Some(ref mut child) = state.child {
+                                        #[cfg(unix)]
+                                        let process_group = child.id();
                                         match child.try_wait() {
                                             Ok(Some(status)) => {
+                                                #[cfg(unix)]
+                                                let _ = crate::platform::kill_process_group(
+                                                    process_group,
+                                                );
                                                 log_process_state_event(
                                                     state,
                                                     format!("[Process exited with: {}]", status),
@@ -758,6 +779,10 @@ impl ProcessManager {
                                                 // Still running
                                             }
                                             Err(e) => {
+                                                #[cfg(unix)]
+                                                let _ = crate::platform::kill_process_group(
+                                                    process_group,
+                                                );
                                                 state.status = ProcessStatus::Error(e.to_string());
                                                 state.child = None;
                                                 state.disk_log = None;
@@ -1241,6 +1266,7 @@ impl ProcessManager {
         for state in processes.values_mut() {
             if state.config.process_type == ProcessType::Process {
                 if let Some(ref mut child) = state.child {
+                    #[cfg(windows)]
                     let pid = child.id();
                     #[cfg(windows)]
                     {
@@ -1250,7 +1276,11 @@ impl ProcessManager {
                             let _ = kill_process_tree(pid);
                         }
                     }
-                    #[cfg(not(windows))]
+                    #[cfg(unix)]
+                    {
+                        let _ = crate::platform::stop_process_group(child);
+                    }
+                    #[cfg(not(any(windows, unix)))]
                     {
                         let _ = child.kill();
                     }
@@ -1419,6 +1449,14 @@ fn refresh_resource_usage(processes: &Arc<Mutex<HashMap<String, ProcessState>>>)
         .max(1) as f64;
     let mut updated = false;
     let mut processes = processes.lock().unwrap();
+    #[cfg(unix)]
+    if processes.values().any(|state| {
+        state.config.process_type == ProcessType::Process
+            && state.status == ProcessStatus::Running
+            && state.child.is_some()
+    }) {
+        crate::platform::refresh_process_resources();
+    }
 
     for state in processes.values_mut() {
         if state.config.process_type != ProcessType::Process
@@ -1496,12 +1534,21 @@ fn resource_usage_changed(previous: ProcessResourceUsage, next: ProcessResourceU
         }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 fn sample_process_resources(
     _state: &ProcessState,
     _root_pid: u32,
 ) -> Option<ResourceCounterSample> {
     None
+}
+
+#[cfg(unix)]
+fn sample_process_resources(_state: &ProcessState, root_pid: u32) -> Option<ResourceCounterSample> {
+    let (cpu_time_100ns, memory_bytes) = crate::platform::process_group_resources(root_pid)?;
+    Some(ResourceCounterSample {
+        cpu_time_100ns: Some(cpu_time_100ns),
+        memory_bytes: Some(memory_bytes),
+    })
 }
 
 #[cfg(windows)]
@@ -1885,10 +1932,7 @@ fn next_log_file_path(process_directory: &Path) -> PathBuf {
 
 fn resolve_log_root(directory: &str) -> PathBuf {
     let trimmed = directory.trim();
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let exe_dir = crate::platform::data_directory();
 
     if trimmed.is_empty() || trimmed == "." {
         return exe_dir;
@@ -2119,6 +2163,7 @@ fn stop_process_inner(
 
     if let Some(mut child) = child_to_kill {
         thread::spawn(move || {
+            #[cfg(windows)]
             let pid = child.id();
             let mut stop_error: Option<String> = None;
 
@@ -2137,7 +2182,14 @@ fn stop_process_inner(
                     let _ = child.kill();
                 }
             }
-            #[cfg(not(windows))]
+            #[cfg(unix)]
+            {
+                if let Err(e) = crate::platform::stop_process_group(&mut child) {
+                    stop_error = Some(e.to_string());
+                    let _ = child.kill();
+                }
+            }
+            #[cfg(not(any(windows, unix)))]
             {
                 if let Err(e) = child.kill() {
                     stop_error = Some(e.to_string());
@@ -2495,6 +2547,11 @@ fn build_command(
 ) -> Result<(Command, String), String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     Ok((cmd, program.to_string()))
 }
 
@@ -2650,6 +2707,41 @@ fn is_supported_extension(ext: &str) -> bool {
     matches!(ext, "exe" | "com" | "cmd" | "bat")
 }
 
+#[cfg(unix)]
+fn parse_command(command: &str) -> Result<(String, Vec<String>), String> {
+    // Shell-style argument quoting without interpreting or executing shell code.
+    let mut quote = None;
+    let mut escaped = false;
+    for c in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if quote == Some(c) {
+            quote = None;
+            continue;
+        }
+        if quote.is_none() {
+            match c {
+                '\'' | '"' => quote = Some(c),
+                '|' | '&' | '<' | '>' | ';' => return Err("Shell operators are not supported without a shell. Use a script or an explicit shell command.".to_string()),
+                _ => {}
+            }
+        }
+    }
+    let mut args = shell_words::split(command).map_err(|e| e.to_string())?;
+    if args.is_empty() || args[0].is_empty() {
+        return Err("Command is empty".to_string());
+    }
+    let program = args.remove(0);
+    Ok((program, args))
+}
+
+#[cfg(not(unix))]
 fn parse_command(command: &str) -> Result<(String, Vec<String>), String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -2847,6 +2939,191 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         false
+    }
+
+    #[cfg(unix)]
+    struct UnixFixture {
+        manager: ProcessManager,
+        id: String,
+        directory: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl UnixFixture {
+        fn new(script: &str, auto_restart: bool) -> Self {
+            let directory = std::env::temp_dir().join(format!("pm-unix-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("worker.sh"), script).unwrap();
+            let manager = ProcessManager::new();
+            let mut config = ProcessConfig::new(
+                "Unix regression".to_string(),
+                "/bin/sh worker.sh".to_string(),
+                directory.to_string_lossy().into_owned(),
+                ProcessType::Process,
+            );
+            config.auto_restart = auto_restart;
+            let id = config.id.clone();
+            manager.add_process(config);
+            manager.start_process(&id);
+            Self {
+                manager,
+                id,
+                directory,
+            }
+        }
+
+        fn child_pid(&self) -> u32 {
+            assert!(unix_wait_until(|| std::fs::read_to_string(
+                self.directory.join("child.pid")
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .is_some()));
+            let content = std::fs::read_to_string(self.directory.join("child.pid")).unwrap();
+            content.trim().parse().unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UnixFixture {
+        fn drop(&mut self) {
+            self.manager.stop_non_docker();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_wait_until(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    fn unix_process_running(pid: u32) -> bool {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&output.stdout);
+        output.status.success() && !status.trim().is_empty() && !status.trim().starts_with('Z')
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_stop_and_app_shutdown_kill_stubborn_descendants() {
+        for shutdown in [false, true] {
+            let fixture = UnixFixture::new(
+                "trap '' TERM\nsleep 60 &\necho $! > child.pid\nwait\n",
+                false,
+            );
+            let child_pid = fixture.child_pid();
+            assert!(unix_process_running(child_pid));
+            assert!(unix_wait_until(
+                || fixture.manager.get_status(&fixture.id) == Some(super::ProcessStatus::Running)
+            ));
+            let root_pid = fixture
+                .manager
+                .get_process_snapshot(&fixture.id)
+                .unwrap()
+                .pid
+                .unwrap();
+            if shutdown {
+                fixture.manager.stop_non_docker();
+            } else {
+                fixture.manager.stop_process(&fixture.id);
+            }
+            assert!(unix_wait_until(
+                || fixture.manager.get_status(&fixture.id) == Some(super::ProcessStatus::Stopped)
+            ));
+            assert!(unix_wait_until(|| !unix_process_running(child_pid)));
+            assert!(!unix_process_running(root_pid));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_parent_exit_cleans_up_background_children() {
+        let fixture = UnixFixture::new("sleep 60 &\necho $! > child.pid\nexit 0\n", false);
+        let child_pid = fixture.child_pid();
+        assert!(unix_wait_until(
+            || fixture.manager.get_status(&fixture.id) == Some(super::ProcessStatus::Stopped)
+        ));
+        assert!(unix_wait_until(|| !unix_process_running(child_pid)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_resources_include_children_and_cpu_time() {
+        let fixture = UnixFixture::new(
+            "/bin/sh -c 'while :; do :; done' &\necho $! > child.pid\nwait\n",
+            false,
+        );
+        let _ = fixture.child_pid();
+        assert!(unix_wait_until(
+            || fixture.manager.get_status(&fixture.id) == Some(super::ProcessStatus::Running)
+        ));
+        let root_pid = fixture
+            .manager
+            .get_process_snapshot(&fixture.id)
+            .unwrap()
+            .pid
+            .unwrap();
+        crate::platform::refresh_process_resources();
+        let first = crate::platform::process_group_resources(root_pid).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        crate::platform::refresh_process_resources();
+        let next = crate::platform::process_group_resources(root_pid).unwrap();
+        assert!(next.1 > 0, "missing group memory");
+        assert!(next.0 > first.0, "missing child CPU time");
+        super::refresh_resource_usage(&fixture.manager.processes);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        super::refresh_resource_usage(&fixture.manager.processes);
+        let snapshot = fixture.manager.get_process_snapshot(&fixture.id).unwrap();
+        assert!(snapshot.cpu_percent.unwrap() > 0.0);
+        assert!(snapshot.memory_bytes.unwrap() > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_managed_restart_and_manual_cancellation() {
+        for code in [0, 7] {
+            let fixture =
+                UnixFixture::new(&format!("echo launched >> launches\nexit {code}\n"), true);
+            assert!(unix_wait_until(|| std::fs::read_to_string(
+                fixture.directory.join("launches")
+            )
+            .unwrap_or_default()
+            .lines()
+            .count()
+                >= 3));
+            fixture.manager.stop_process(&fixture.id);
+            let generation =
+                fixture.manager.processes.lock().unwrap()[&fixture.id].start_generation;
+            std::thread::sleep(std::time::Duration::from_millis(1600));
+            let processes = fixture.manager.processes.lock().unwrap();
+            let state = &processes[&fixture.id];
+            assert_eq!(state.status, super::ProcessStatus::Stopped);
+            assert!(state.child.is_none());
+            assert_eq!(state.start_generation, generation);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_command_quoting_supports_shell_wrappers_and_empty_arguments() {
+        let (program, args) =
+            super::parse_command("/bin/sh -c 'echo hello && echo world' \"\" 'two words'").unwrap();
+        assert_eq!(program, "/bin/sh");
+        assert_eq!(args, ["-c", "echo hello && echo world", "", "two words"]);
+        assert!(super::parse_command("echo hello && echo world").is_err());
+        assert!(super::parse_command("echo hello; echo world").is_err());
+        assert!(super::parse_command("echo 'unclosed").is_err());
     }
 
     #[cfg(windows)]

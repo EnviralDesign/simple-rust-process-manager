@@ -2,6 +2,7 @@
 
 mod config;
 mod log_classification;
+mod platform;
 mod process_manager;
 mod rest_api;
 mod ui;
@@ -17,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     std::env::set_current_dir(exe_directory)?;
 
+    platform::initialize();
     ui::run()?;
     Ok(())
 }
@@ -32,7 +34,7 @@ fn normalize_config_from_args() -> bool {
     }
 
     let Some(path) = args.next() else {
-        eprintln!("Usage: simple-rust-process-manager.exe --normalize-config <processes.json>");
+        eprintln!("Usage: simple-rust-process-manager --normalize-config <processes.json>");
         std::process::exit(2);
     };
 

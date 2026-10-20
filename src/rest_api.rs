@@ -1015,7 +1015,7 @@ pub fn build_agent_bootstrap(
         "4. Call GET /processes/{id}/logs?limit=200 to fetch the latest log tail for a component."
             .to_string(),
         "5. Use POST /stack/reload to reread processes.json from disk. This stops all managed processes first, regardless of status or stack-control settings.".to_string(),
-        "6. To regroup entries, edit the groups array in processes.json next to the Process Manager executable, then call POST /stack/reload.".to_string(),
+        format!("6. To regroup entries, edit the groups array in {}, then call POST /stack/reload.", AppConfig::config_path().display()),
         "7. Use POST /processes/{id}/reload to reread one process from processes.json."
             .to_string(),
         "8. Use POST /stack/start, /stack/stop, or /stack/restart for entries that opt into each stack control."
