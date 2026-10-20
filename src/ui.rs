@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -309,6 +309,7 @@ struct ProcessDraft {
     name: String,
     command: String,
     working_directory: String,
+    working_directory_suggestion: RelativePathSuggestion,
     process_type: ProcessType,
     auto_start: bool,
     startup_delay_seconds: String,
@@ -332,6 +333,7 @@ impl Default for ProcessDraft {
             name: String::new(),
             command: String::new(),
             working_directory: String::new(),
+            working_directory_suggestion: RelativePathSuggestion::default(),
             process_type: ProcessType::Process,
             auto_start: false,
             startup_delay_seconds: DEFAULT_STARTUP_DELAY_SECONDS.to_string(),
@@ -357,6 +359,7 @@ impl ProcessDraft {
             name: process.name.clone(),
             command: process.command.clone(),
             working_directory: process.working_directory.clone(),
+            working_directory_suggestion: RelativePathSuggestion::default(),
             process_type: process.process_type.clone(),
             auto_start: process.auto_start,
             startup_delay_seconds: process.startup_delay_seconds.to_string(),
@@ -433,6 +436,7 @@ struct RestSettingsForm {
     enabled: bool,
     port: String,
     log_directory: String,
+    log_directory_suggestion: RelativePathSuggestion,
     process_error_flash_seconds: String,
 }
 
@@ -442,6 +446,7 @@ impl RestSettingsForm {
             enabled: config.remote_control.enabled,
             port: config.remote_control.port.to_string(),
             log_directory: config.log_directory.clone(),
+            log_directory_suggestion: RelativePathSuggestion::default(),
             process_error_flash_seconds: config.process_error_flash_seconds.to_string(),
         }
     }
@@ -3305,9 +3310,10 @@ impl ProcessManagerApp {
                                         if form.process_type == ProcessType::Process {
                                             ui.add_space(14.0);
                                             ui.label(field_label("Working Directory"));
-                                            modal_text_edit(
+                                            modal_path_edit(
                                                 ui,
                                                 &mut form.working_directory,
+                                                &mut form.working_directory_suggestion,
                                                 "C:/projects/my-app",
                                                 MODAL_FORM_WIDTH,
                                             );
@@ -3501,7 +3507,6 @@ impl ProcessManagerApp {
 
         let mut open = true;
         let mut save = false;
-        let mut browse_for_logs = false;
         let mut host_text = "127.0.0.1".to_string();
 
         Window::new("Global Settings")
@@ -3564,16 +3569,13 @@ impl ProcessManagerApp {
                                 );
                                 ui.add_space(14.0);
                                 ui.label(field_label("Log Directory"));
-                                let (_, browse_response) = modal_text_edit_with_button(
+                                modal_path_edit(
                                     ui,
                                     &mut self.rest_settings_form.log_directory,
+                                    &mut self.rest_settings_form.log_directory_suggestion,
                                     ".",
                                     MODAL_FORM_WIDTH,
-                                    "Browse",
                                 );
-                                if browse_response.clicked() {
-                                    browse_for_logs = true;
-                                }
                                 ui.add_space(6.0);
                                 ui.label(
                                     RichText::new(
@@ -3672,12 +3674,6 @@ impl ProcessManagerApp {
 
         if !open {
             self.rest_settings_open = false;
-        }
-
-        if browse_for_logs {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                self.rest_settings_form.log_directory = path.display().to_string();
-            }
         }
 
         if save {
@@ -4884,28 +4880,139 @@ fn modal_disabled_text_edit(ui: &mut Ui, value: &mut String, width: f32) -> egui
     .inner
 }
 
-fn modal_text_edit_with_button(
+#[derive(Clone, Default)]
+struct RelativePathSuggestion {
+    checked_value: Option<String>,
+    pending: Option<Arc<OnceLock<Option<String>>>>,
+    relative: Option<String>,
+}
+
+impl RelativePathSuggestion {
+    fn update(&mut self, value: &str, committed: bool, ctx: &Context) {
+        if self.checked_value.as_deref() != Some(value) {
+            self.pending = None;
+            self.relative = None;
+            self.checked_value = None;
+            if committed {
+                self.checked_value = Some(value.to_string());
+                let path = value.trim().trim_matches('"');
+                if Path::new(path).is_absolute() {
+                    let path = PathBuf::from(path);
+                    let result = Arc::new(OnceLock::new());
+                    self.pending = Some(result.clone());
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        let relative = std::env::current_exe()
+                            .ok()
+                            .and_then(|exe| relative_path(exe.parent()?, &path))
+                            .and_then(|path| path.into_os_string().into_string().ok());
+                        let _ = result.set(relative);
+                        ctx.request_repaint();
+                    });
+                }
+            }
+        }
+
+        if let Some(relative) = self.pending.as_ref().and_then(|result| result.get()) {
+            self.relative = relative.clone();
+            self.pending = None;
+        }
+    }
+}
+
+fn relative_path(base: &Path, target: &Path) -> Option<PathBuf> {
+    if !base.is_absolute() || !target.is_absolute() {
+        return None;
+    }
+
+    let base: Vec<_> = base.components().collect();
+    let target: Vec<_> = target.components().collect();
+    let common = base
+        .iter()
+        .zip(&target)
+        .take_while(|(a, b)| {
+            a == b
+                || (cfg!(windows)
+                    && a.as_os_str()
+                        .to_str()
+                        .zip(b.as_os_str().to_str())
+                        .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b)))
+        })
+        .count();
+
+    let mut relative = PathBuf::new();
+    for component in &base[common..] {
+        if !matches!(component, Component::Normal(_)) {
+            return None;
+        }
+        relative.push("..");
+    }
+    for component in &target[common..] {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+    Some(relative)
+}
+
+fn modal_path_edit(
     ui: &mut Ui,
     value: &mut String,
+    suggestion: &mut RelativePathSuggestion,
     hint: &str,
     total_width: f32,
-    button_label: &str,
-) -> (egui::Response, egui::Response) {
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let field_width = (total_width - BROWSE_BUTTON_WIDTH - 8.0).max(0.0);
-        let field_response = modal_text_edit(ui, value, hint, field_width);
-        let button_response = chrome_text_button(
-            ui,
-            button_label,
-            TEXT_MAIN,
-            Vec2::new(BROWSE_BUTTON_WIDTH, MODAL_BUTTON_HEIGHT),
-            12.0,
-            true,
-        );
-        (field_response, button_response)
-    })
-    .inner
+) {
+    let (field_response, browse_response) = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let field_width = (total_width - BROWSE_BUTTON_WIDTH - 8.0).max(0.0);
+            let field_response = modal_text_edit(ui, value, hint, field_width);
+            let button_response = chrome_text_button(
+                ui,
+                "Browse",
+                TEXT_MAIN,
+                Vec2::new(BROWSE_BUTTON_WIDTH, MODAL_BUTTON_HEIGHT),
+                12.0,
+                true,
+            );
+            (field_response, button_response)
+        })
+        .inner;
+
+    let mut committed = !field_response.has_focus();
+    if browse_response.clicked() {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_directory(value.trim().trim_matches('"'))
+            .pick_folder()
+        {
+            *value = path.display().to_string();
+            committed = true;
+        }
+    }
+    suggestion.update(value, committed, ui.ctx());
+
+    if let Some(relative) = suggestion.relative.clone() {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if shell_button(ui, "Use relative path")
+                .on_hover_text(format!(
+                    "Relative to the Process Manager EXE folder:\n{relative}"
+                ))
+                .clicked()
+            {
+                *value = relative.clone();
+                suggestion.update(value, true, ui.ctx());
+            }
+            if shell_button(ui, "Dismiss").clicked() {
+                suggestion.relative = None;
+            }
+            ui.add(
+                egui::Label::new(RichText::new(&relative).color(TEXT_MUTED).size(11.5)).truncate(),
+            )
+            .on_hover_text(&relative);
+        });
+    }
 }
 
 fn modal_divider(ui: &mut Ui) {
@@ -4916,6 +5023,168 @@ fn modal_divider(ui: &mut Ui) {
         rect.center().y,
         Stroke::new(1.0_f32, SHELL_SUBTLE_STROKE),
     );
+}
+
+#[cfg(test)]
+mod relative_path_tests {
+    use super::*;
+
+    #[test]
+    fn relative_routes_cover_children_siblings_parents_and_same_directory() {
+        let base = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let parent = base.parent().unwrap();
+        for (target, expected) in [
+            (base.clone(), PathBuf::from(".")),
+            (base.join("service files"), PathBuf::from("service files")),
+            (parent.to_path_buf(), PathBuf::from("..")),
+            (parent.join("service"), PathBuf::from("..").join("service")),
+            (
+                base.join("new").join("logs"),
+                PathBuf::from("new").join("logs"),
+            ),
+        ] {
+            assert_eq!(relative_path(&base, &target), Some(expected));
+        }
+        assert!(relative_path(&base, Path::new("already-relative")).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_routes_respect_drives_shares_and_case() {
+        for (base, target, expected) in [
+            (
+                r"C:\Apps\Manager",
+                r"c:\apps\Services\Worker",
+                Some(r"..\Services\Worker"),
+            ),
+            (r"C:\Apps\Manager", r"D:\Services", None),
+            (r"C:\Apps\Manager", r"C:Services", None),
+            (r"C:\Apps\Manager", r"\Services", None),
+            (
+                r"\\server\share\Manager",
+                r"\\server\share\Worker",
+                Some(r"..\Worker"),
+            ),
+            (r"\\server\share\Manager", r"\\server\other\Worker", None),
+            (
+                r"C:\Apps\Manager",
+                r"C:\Apps\Manager\..\Worker",
+                Some(r"..\Worker"),
+            ),
+        ] {
+            assert_eq!(
+                relative_path(Path::new(base), Path::new(target)),
+                expected.map(PathBuf::from)
+            );
+        }
+    }
+
+    #[test]
+    fn checks_wait_for_commit_and_ignore_results_for_old_values() {
+        let ctx = Context::default();
+        let base = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let value = format!("\"{}\"", base.join("service files").display());
+        let mut suggestion = RelativePathSuggestion::default();
+        suggestion.update(&value, false, &ctx);
+        assert!(suggestion.pending.is_none());
+        suggestion.update(&value, true, &ctx);
+        let pending = suggestion.pending.clone().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pending.get().is_none() {
+            assert!(Instant::now() < deadline, "Path check did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        suggestion.update(&value, true, &ctx);
+        assert_eq!(suggestion.relative.as_deref(), Some("service files"));
+
+        suggestion.relative = None;
+        suggestion.update(&value, true, &ctx);
+        assert!(
+            suggestion.relative.is_none(),
+            "Dismissed suggestion returned"
+        );
+        assert!(suggestion.pending.is_none());
+
+        suggestion.pending = Some(pending);
+        suggestion.update("different value being typed", false, &ctx);
+        assert!(suggestion.relative.is_none());
+        assert!(suggestion.pending.is_none());
+    }
+
+    #[test]
+    fn editor_buttons_convert_only_on_click_and_dismiss_without_changing_value() {
+        for button in ["Use relative path", "Dismiss"] {
+            let ctx = Context::default();
+            configure_fonts(&ctx);
+            configure_visuals(&ctx);
+            let absolute = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("service");
+            let mut value = absolute.display().to_string();
+            let mut suggestion = RelativePathSuggestion {
+                checked_value: Some(value.clone()),
+                relative: Some("service".to_string()),
+                ..Default::default()
+            };
+            let mut frame = |events: Vec<egui::Event>| {
+                ctx.run(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        CentralPanel::default().show(ctx, |ui| {
+                            ui.set_width(MODAL_FORM_WIDTH);
+                            modal_path_edit(ui, &mut value, &mut suggestion, ".", MODAL_FORM_WIDTH);
+                        });
+                    },
+                )
+            };
+            let output = frame(Vec::new());
+            let position = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == button => {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .expect("Suggestion button should be visible");
+            for pressed in [true, false] {
+                frame(vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ]);
+            }
+            let output = frame(Vec::new());
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == "Use relative path")));
+            assert_eq!(
+                value,
+                if button == "Use relative path" {
+                    "service".to_string()
+                } else {
+                    absolute.display().to_string()
+                }
+            );
+        }
+    }
 }
 
 fn draw_restart_schedule_summary(ui: &mut Ui, form: &mut ProcessDraft) {
