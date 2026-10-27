@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener as StdTcpListener};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, RwLock,
@@ -19,7 +19,6 @@ use tokio::sync::{oneshot, watch};
 use crate::config::{AppConfig, ProcessGroupConfig, RemoteControlConfig};
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessRuntimeSnapshot};
 
-pub const REST_HOST: &str = "127.0.0.1";
 const DEFAULT_LOG_LIMIT: usize = 200;
 const MAX_LOG_LIMIT: usize = 1_000;
 
@@ -34,43 +33,43 @@ pub enum RestServerState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestServerSnapshot {
     pub state: RestServerState,
-    pub host: String,
+    pub host: IpAddr,
     pub port: u16,
     pub message: Option<String>,
 }
 
 impl RestServerSnapshot {
-    pub fn disabled(port: u16) -> Self {
+    pub fn disabled(host: IpAddr, port: u16) -> Self {
         Self {
             state: RestServerState::Disabled,
-            host: REST_HOST.to_string(),
+            host,
             port,
             message: None,
         }
     }
 
-    pub fn starting(port: u16) -> Self {
+    pub fn starting(host: IpAddr, port: u16) -> Self {
         Self {
             state: RestServerState::Starting,
-            host: REST_HOST.to_string(),
+            host,
             port,
             message: None,
         }
     }
 
-    pub fn running(port: u16) -> Self {
+    pub fn running(host: IpAddr, port: u16) -> Self {
         Self {
             state: RestServerState::Running,
-            host: REST_HOST.to_string(),
+            host,
             port,
             message: None,
         }
     }
 
-    pub fn error(port: u16, message: impl Into<String>) -> Self {
+    pub fn error(host: IpAddr, port: u16, message: impl Into<String>) -> Self {
         Self {
             state: RestServerState::Error,
-            host: REST_HOST.to_string(),
+            host,
             port,
             message: Some(message.into()),
         }
@@ -87,6 +86,7 @@ struct ApiState {
     manager: Arc<ProcessManager>,
     stack_name: Arc<RwLock<String>>,
     config_reload_tx: watch::Sender<ConfigReloadEvent>,
+    host: IpAddr,
     port: u16,
 }
 
@@ -110,8 +110,10 @@ pub struct RestServerController {
 impl RestServerController {
     pub fn new(manager: Arc<ProcessManager>) -> Self {
         let default_remote = RemoteControlConfig::default();
-        let (snapshot_tx, _snapshot_rx) =
-            watch::channel(RestServerSnapshot::disabled(default_remote.port));
+        let (snapshot_tx, _snapshot_rx) = watch::channel(RestServerSnapshot::disabled(
+            default_remote.bind_address,
+            default_remote.port,
+        ));
         let (config_reload_tx, _config_reload_rx) = watch::channel(ConfigReloadEvent::default());
         Self {
             manager,
@@ -148,16 +150,26 @@ impl RestServerController {
         self.stop_active_server();
 
         if !remote_control.enabled {
-            self.publish_snapshot(RestServerSnapshot::disabled(remote_control.port));
+            self.publish_snapshot(RestServerSnapshot::disabled(
+                remote_control.bind_address,
+                remote_control.port,
+            ));
             return;
         }
 
-        self.publish_snapshot(RestServerSnapshot::starting(remote_control.port));
+        self.publish_snapshot(RestServerSnapshot::starting(
+            remote_control.bind_address,
+            remote_control.port,
+        ));
 
-        let listener = match bind_listener(remote_control.port) {
+        let listener = match bind_listener(remote_control.bind_address, remote_control.port) {
             Ok(listener) => listener,
             Err(err) => {
-                self.publish_snapshot(RestServerSnapshot::error(remote_control.port, err));
+                self.publish_snapshot(RestServerSnapshot::error(
+                    remote_control.bind_address,
+                    remote_control.port,
+                    err,
+                ));
                 return;
             }
         };
@@ -166,6 +178,7 @@ impl RestServerController {
             manager: self.manager.clone(),
             stack_name: self.stack_name.clone(),
             config_reload_tx: self.config_reload_tx.clone(),
+            host: remote_control.bind_address,
             port: remote_control.port,
         };
         let router = Router::new()
@@ -193,6 +206,7 @@ impl RestServerController {
         let snapshot_tx = self.snapshot_tx.clone();
         let generation_ref = self.generation.clone();
         let port = remote_control.port;
+        let host = remote_control.bind_address;
 
         let task = tokio::spawn(async move {
             let serve_result = axum::serve(listener, router)
@@ -203,7 +217,8 @@ impl RestServerController {
 
             if let Err(err) = serve_result {
                 if generation_ref.load(Ordering::SeqCst) == generation {
-                    let _ = snapshot_tx.send(RestServerSnapshot::error(port, err.to_string()));
+                    let _ =
+                        snapshot_tx.send(RestServerSnapshot::error(host, port, err.to_string()));
                 }
             }
         });
@@ -212,7 +227,10 @@ impl RestServerController {
         *active_server = Some(ActiveServer { shutdown_tx, task });
         drop(active_server);
 
-        self.publish_snapshot(RestServerSnapshot::running(remote_control.port));
+        self.publish_snapshot(RestServerSnapshot::running(
+            remote_control.bind_address,
+            remote_control.port,
+        ));
     }
 
     pub fn shutdown(&self) {
@@ -220,7 +238,10 @@ impl RestServerController {
         self.stop_active_server();
 
         let desired = self.desired_config.lock().unwrap().clone();
-        self.publish_snapshot(RestServerSnapshot::disabled(desired.port));
+        self.publish_snapshot(RestServerSnapshot::disabled(
+            desired.bind_address,
+            desired.port,
+        ));
     }
 
     fn stop_active_server(&self) {
@@ -236,8 +257,8 @@ impl RestServerController {
     }
 }
 
-fn bind_listener(port: u16) -> Result<tokio::net::TcpListener, String> {
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+fn bind_listener(host: IpAddr, port: u16) -> Result<tokio::net::TcpListener, String> {
+    let address = SocketAddr::from((host, port));
     let mut last_error = None;
 
     for _ in 0..5 {
@@ -258,7 +279,7 @@ fn bind_listener(port: u16) -> Result<tokio::net::TcpListener, String> {
 
     Err(format!(
         "Could not bind {}:{} ({})",
-        REST_HOST,
+        host,
         port,
         last_error.unwrap_or_else(|| "unknown error".to_string())
     ))
@@ -266,7 +287,7 @@ fn bind_listener(port: u16) -> Result<tokio::net::TcpListener, String> {
 
 #[derive(Serialize)]
 struct BindInfo {
-    host: &'static str,
+    host: IpAddr,
     port: u16,
 }
 
@@ -343,7 +364,7 @@ async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
         ok: true,
         stack_name: current_stack_name(&state.stack_name),
         bind: BindInfo {
-            host: REST_HOST,
+            host: state.host,
             port: state.port,
         },
         server_enabled: true,
@@ -629,6 +650,22 @@ fn publish_config_reload(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn listener_and_bootstrap_use_configured_address() {
+        for host in ["127.0.0.1", "0.0.0.0"] {
+            let host: IpAddr = host.parse().unwrap();
+            let listener = bind_listener(host, 0).unwrap();
+            assert_eq!(listener.local_addr().unwrap().ip(), host);
+            let config = RemoteControlConfig {
+                bind_address: host,
+                ..Default::default()
+            };
+            let text = build_agent_bootstrap("Test", &config, &[], &[]);
+            assert!(text.contains(&format!("Host: {}", host)));
+            assert!(!text.contains("loopback-only"));
+        }
+    }
+
     #[test]
     fn config_reload_events_advance_and_preserve_scope() {
         let (tx, rx) = watch::channel(ConfigReloadEvent::default());
@@ -649,9 +686,9 @@ mod tests {
 
 async fn topology(State(state): State<ApiState>) -> Json<TopologyResponse> {
     Json(TopologyResponse {
-        base_url: format!("http://{}:{}", REST_HOST, state.port),
+        base_url: format!("http://{}", SocketAddr::new(state.host, state.port)),
         bind: BindInfo {
-            host: REST_HOST,
+            host: state.host,
             port: state.port,
         },
         read_endpoints: vec![
@@ -1000,13 +1037,13 @@ pub fn build_agent_bootstrap(
     groups: &[ProcessGroupConfig],
 ) -> String {
     let mut lines = vec![
-        "Local Process Manager Skill".to_string(),
+        "Process Manager Skill".to_string(),
         format!("Stack: {}", stack_name),
-        format!("Host: {}", REST_HOST),
+        format!("Host: {}", remote_control.bind_address),
         format!("Port: {}", remote_control.port),
-        format!("Base URL: http://{}:{}", REST_HOST, remote_control.port),
-        "Scope: loopback-only (127.0.0.1); this API is not exposed to the network.".to_string(),
-        "The runtime details in this copied text are a snapshot and may be stale. Before reporting current state or taking action, check GET /health, GET /processes, and GET /groups. GET /health is the source of truth for API reachability. If it cannot be reached, check that Local API is enabled in Global Settings and confirm the host and port above; a failed request alone does not establish that the API is disabled.".to_string(),
+        format!("Base URL: http://{}", SocketAddr::new(remote_control.bind_address, remote_control.port)),
+        format!("Bind address: {}. Authentication: none.{}", remote_control.bind_address, if remote_control.bind_address.is_unspecified() { " Connect using this PC's reachable IP address instead of the wildcard bind address." } else { "" }),
+        "The runtime details in this copied text are a snapshot and may be stale. Before reporting current state or taking action, check GET /health, GET /processes, and GET /groups. GET /health is the source of truth for API reachability. If it cannot be reached, check that API is enabled in Global Settings and confirm the host and port above; a failed request alone does not establish that the API is disabled.".to_string(),
         String::new(),
         "Usage".to_string(),
         "1. Call GET /health to confirm the server is reachable.".to_string(),

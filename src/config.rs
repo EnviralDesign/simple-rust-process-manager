@@ -449,13 +449,16 @@ pub fn weekly_hour_enabled(hours: &[bool], day_index: usize, hour: u32) -> bool 
         .unwrap_or(false)
 }
 
-/// Configuration for the optional localhost REST control surface
+/// Configuration for the optional REST control surface
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteControlConfig {
-    /// Whether the local REST server is enabled
+    /// Interface address; defaults to loopback. Use 0.0.0.0 for all IPv4 interfaces.
+    #[serde(default = "default_bind_address")]
+    pub bind_address: std::net::IpAddr,
+    /// Whether the REST server is enabled
     #[serde(default)]
     pub enabled: bool,
-    /// TCP port to bind on 127.0.0.1
+    /// TCP port to bind
     #[serde(default = "default_remote_control_port")]
     pub port: u16,
 }
@@ -464,9 +467,14 @@ impl Default for RemoteControlConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            bind_address: default_bind_address(),
             port: default_remote_control_port(),
         }
     }
+}
+
+fn default_bind_address() -> std::net::IpAddr {
+    std::net::Ipv4Addr::LOCALHOST.into()
 }
 
 fn default_remote_control_port() -> u16 {
@@ -479,7 +487,7 @@ pub struct AppConfig {
     /// Name/label for this stack (to identify different instances)
     #[serde(default = "default_stack_name")]
     pub stack_name: String,
-    /// Optional localhost REST control server settings
+    /// Optional REST control server settings
     #[serde(default)]
     pub remote_control: RemoteControlConfig,
     /// Base directory for persisted process logs. Relative paths resolve beside processes.json.
@@ -974,6 +982,19 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_bind_address_defaults_and_round_trips() {
+        let old: AppConfig =
+            serde_json::from_str(r#"{"remote_control":{"enabled":true,"port":47821}}"#).unwrap();
+        assert_eq!(old.remote_control.bind_address.to_string(), "127.0.0.1");
+        let lan: AppConfig =
+            serde_json::from_str(r#"{"remote_control":{"enabled":true,"bind_address":"0.0.0.0"}}"#)
+                .unwrap();
+        let saved = serde_json::to_string(&lan).unwrap();
+        let loaded: AppConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.remote_control.bind_address.to_string(), "0.0.0.0");
+    }
 
     #[test]
     fn missing_startup_delay_defaults_to_zero_and_serializes() {

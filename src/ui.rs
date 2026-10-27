@@ -225,7 +225,9 @@ struct DiagnosticsState {
     last_motion_resize_events: u64,
 }
 
-pub fn run() -> eframe::Result<()> {
+pub fn run(
+    #[cfg(windows)] instance: &crate::single_instance::SingleInstance,
+) -> eframe::Result<()> {
     let toggles = RuntimeToggles::from_env();
 
     let mut viewport = ViewportBuilder::default()
@@ -249,7 +251,13 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         "Process Manager",
         native_options,
-        Box::new(move |cc| Ok(Box::new(ProcessManagerApp::new(cc, toggles.clone())))),
+        Box::new(move |cc| {
+            #[cfg(windows)]
+            if let Some(hwnd) = extract_root_hwnd(cc) {
+                instance.register_window(hwnd)?;
+            }
+            Ok(Box::new(ProcessManagerApp::new(cc, toggles.clone())))
+        }),
     )
 }
 
@@ -2231,13 +2239,19 @@ impl ProcessManagerApp {
                         };
                         let api_hover = if self.config.remote_control.enabled {
                             format!(
-                                "Disable the Local API on 127.0.0.1:{}.",
-                                self.config.remote_control.port
+                                "Disable the API on {}.",
+                                std::net::SocketAddr::new(
+                                    self.config.remote_control.bind_address,
+                                    self.config.remote_control.port
+                                )
                             )
                         } else {
                             format!(
-                                "Enable the Local API on 127.0.0.1:{}.",
-                                self.config.remote_control.port
+                                "Enable the API on {}.",
+                                std::net::SocketAddr::new(
+                                    self.config.remote_control.bind_address,
+                                    self.config.remote_control.port
+                                )
                             )
                         };
                         if chrome_text_button(
@@ -3513,7 +3527,7 @@ impl ProcessManagerApp {
 
         let mut open = true;
         let mut save = false;
-        let mut host_text = "127.0.0.1".to_string();
+        let mut host_text = self.config.remote_control.bind_address.to_string();
 
         Window::new("Global Settings")
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
@@ -3548,7 +3562,7 @@ impl ProcessManagerApp {
                                 ui,
                                 &mut self.global_settings_tab,
                                 1usize,
-                                "Local API",
+                                "API",
                             );
                             modal_tab_button(ui, &mut self.global_settings_tab, 2usize, "About");
                         });
@@ -3610,8 +3624,8 @@ impl ProcessManagerApp {
                                 modal_checkbox_row(
                                     ui,
                                     &mut self.rest_settings_form.enabled,
-                                    "Enable localhost REST control",
-                                    Some("Expose a loopback-only API for local tooling."),
+                                    "Enable REST control",
+                                    Some("Expose the API on the configured bind address. No authentication."),
                                 );
                                 ui.add_space(14.0);
                                 ui.label(field_label("Host"));
@@ -3626,7 +3640,7 @@ impl ProcessManagerApp {
                                 );
                                 ui.add_space(6.0);
                                 ui.label(
-                                    RichText::new("The API binds only to 127.0.0.1.")
+                                    RichText::new(format!("The API binds to {}. Set remote_control.bind_address in processes.json to change it.", host_text))
                                         .color(TEXT_MUTED)
                                         .size(11.5),
                                 );

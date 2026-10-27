@@ -5,6 +5,8 @@ mod log_classification;
 mod platform;
 mod process_manager;
 mod rest_api;
+#[cfg(windows)]
+mod single_instance;
 mod ui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,8 +20,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     std::env::set_current_dir(exe_directory)?;
 
+    #[cfg(windows)]
+    let Some(instance) =
+        single_instance::SingleInstance::acquire(&config::AppConfig::config_path())?
+    else {
+        return Ok(());
+    };
+
     platform::initialize();
-    ui::run()?;
+    ui::run(
+        #[cfg(windows)]
+        &instance,
+    )?;
     Ok(())
 }
 
