@@ -168,31 +168,62 @@ impl ProcessManagerApp {
         }
 
         if let Some(nav) = self.pending_nav.clone() {
-            let name = self.editor.as_ref().map(|e| e.name()).unwrap_or_default();
+            let stack = self.view == super::View::StackSettings
+                && self.stack_form.differs_from(&self.config);
+            let (title, body) = if stack {
+                (
+                    "Save the stack settings?".to_string(),
+                    "You changed the stack settings and have not saved them.",
+                )
+            } else {
+                let name = self.editor.as_ref().map(|e| e.name()).unwrap_or_default();
+                (
+                    format!("Save the changes to {name}?"),
+                    "You changed its settings and have not saved them.",
+                )
+            };
             let answer = dialog(
                 ctx,
                 "unsaved_settings",
-                &format!("Save the changes to {name}?"),
-                |ui| paragraph(ui, "You changed its settings and have not saved them."),
+                &title,
+                |ui| paragraph(ui, body),
                 "Save",
                 Some("Discard"),
                 "Keep editing",
             );
             match answer {
+                Some(Answer::Confirm) if stack => {
+                    self.save_stack_settings();
+                    if self.stack_form.differs_from(&self.config) {
+                        // It did not validate; stay with it.
+                        self.pending_nav = None;
+                        self.pending_tab = None;
+                    } else {
+                        self.go(nav);
+                    }
+                }
                 Some(Answer::Confirm) => {
                     self.save_editor(false);
                     if self.editor.as_ref().is_some_and(|e| e.is_dirty()) {
                         // The draft did not validate; stay with it.
                         self.pending_nav = None;
+                        self.pending_tab = None;
                     } else {
                         self.go(nav);
                     }
                 }
                 Some(Answer::Alternate) => {
-                    self.editor = None;
+                    if stack {
+                        self.stack_form = super::StackSettingsForm::from_config(&self.config);
+                    } else {
+                        self.editor = None;
+                    }
                     self.go(nav);
                 }
-                Some(Answer::Cancel) => self.pending_nav = None,
+                Some(Answer::Cancel) => {
+                    self.pending_nav = None;
+                    self.pending_tab = None;
+                }
                 None => {}
             }
         }

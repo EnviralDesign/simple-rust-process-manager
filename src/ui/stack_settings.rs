@@ -44,7 +44,7 @@ impl StackSettingsForm {
         }
     }
 
-    fn differs_from(&self, config: &AppConfig) -> bool {
+    pub(super) fn differs_from(&self, config: &AppConfig) -> bool {
         self.stack_name.trim() != config.stack_name
             || normalize_log_directory(&self.log_directory) != config.log_directory
             || self.flash_seconds.trim() != config.process_error_flash_seconds.to_string()
@@ -204,7 +204,7 @@ impl ProcessManagerApp {
         }
     }
 
-    fn save_stack_settings(&mut self) {
+    pub(super) fn save_stack_settings(&mut self) {
         let form = &mut self.stack_form;
         let port = match form.port.trim().parse::<u16>() {
             Ok(port) if port > 0 => port,

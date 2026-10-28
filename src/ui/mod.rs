@@ -447,6 +447,8 @@ pub struct ProcessManagerApp {
     dragged_sidebar_item: Option<SidebarDragItem>,
     editor: Option<Editor>,
     pending_nav: Option<Nav>,
+    /// The tab to open once a held navigation goes ahead.
+    pending_tab: Option<ProcessTab>,
     delete_process_id: Option<String>,
     reload_processes_confirm_open: bool,
     rename_group: Option<(String, String)>,
@@ -554,6 +556,7 @@ impl ProcessManagerApp {
             dragged_sidebar_item: None,
             editor: None,
             pending_nav: None,
+            pending_tab: None,
             delete_process_id: None,
             reload_processes_confirm_open: false,
             rename_group: None,
@@ -632,6 +635,7 @@ impl ProcessManagerApp {
                 self.tab = ProcessTab::Activity;
             }
             "palette" => self.palette = Some(palette::PaletteState::default()),
+            "delete" => self.delete_process_id = self.selected_process.clone(),
             _ => {}
         }
     }
@@ -789,14 +793,34 @@ impl ProcessManagerApp {
 
     /// Goes somewhere, asking first when it would leave unsaved settings behind.
     fn navigate(&mut self, nav: Nav) {
-        if self.leaves_unsaved_editor(&nav) {
+        if self.leaves_unsaved_work(&nav) {
             self.pending_nav = Some(nav);
             return;
         }
+        self.pending_tab = None;
         self.go(nav);
     }
 
-    fn leaves_unsaved_editor(&self, nav: &Nav) -> bool {
+    /// Opens a process on a given tab; the tab waits with the navigation if that has to ask.
+    fn open_process_tab(&mut self, process_id: String, tab: ProcessTab) {
+        let nav = Nav::Process(process_id);
+        if self.leaves_unsaved_work(&nav) {
+            self.pending_nav = Some(nav);
+            self.pending_tab = Some(tab);
+            return;
+        }
+        self.go(nav);
+        self.set_tab(tab);
+    }
+
+    /// Something on screen has not been saved and going to `nav` would leave it.
+    fn leaves_unsaved_work(&self, nav: &Nav) -> bool {
+        if self.view == View::StackSettings
+            && *nav != Nav::StackSettings
+            && self.stack_form.differs_from(&self.config)
+        {
+            return true;
+        }
         let Some(editor) = &self.editor else {
             return false;
         };
@@ -808,6 +832,14 @@ impl ProcessManagerApp {
             (Nav::NewProcess, None) => false,
             _ => true,
         }
+    }
+
+    /// A dialog is up, so the window's own shortcuts wait.
+    fn modal_open(&self) -> bool {
+        self.pending_nav.is_some()
+            || self.delete_process_id.is_some()
+            || self.rename_group.is_some()
+            || self.reload_processes_confirm_open
     }
 
     fn go(&mut self, nav: Nav) {
@@ -839,12 +871,22 @@ impl ProcessManagerApp {
             }
             Nav::StackSettings => {
                 self.drop_clean_editor();
-                self.stack_form = StackSettingsForm::from_config(&self.config);
+                if !self.stack_form.differs_from(&self.config) {
+                    self.stack_form = StackSettingsForm::from_config(&self.config);
+                }
                 self.view = View::StackSettings;
             }
             Nav::NewProcess => {
-                self.editor = Some(Editor::new_process());
+                // A half-filled new process stays when New process is asked for again.
+                if self.editor.as_ref().is_none_or(|e| e.process_id.is_some()) {
+                    self.editor = Some(Editor::new_process());
+                }
                 self.view = View::NewProcess;
+            }
+        }
+        if let Some(tab) = self.pending_tab.take() {
+            if self.view == View::Process {
+                self.set_tab(tab);
             }
         }
         self.refresh_runtime_snapshot(true);
@@ -879,16 +921,15 @@ impl ProcessManagerApp {
     }
 
     /// The editor for the selected process, created on first use and kept while it is dirty.
+    /// Never replaces another draft that has unsaved changes.
     fn ensure_editor(&mut self) {
         let Some(id) = self.selected_process.clone() else {
             return;
         };
-        if self
-            .editor
-            .as_ref()
-            .is_some_and(|editor| editor.process_id.as_deref() == Some(id.as_str()))
-        {
-            return;
+        if let Some(editor) = &self.editor {
+            if editor.process_id.as_deref() == Some(id.as_str()) || editor.is_dirty() {
+                return;
+            }
         }
         if let Some(process) = self.process_config(&id) {
             self.editor = Some(Editor::for_process(&process));
@@ -1217,22 +1258,26 @@ impl ProcessManagerApp {
             return;
         };
 
-        if !self.manager.reload_process_from_config(updated.clone()) {
+        if self.manager.get_process_config(process_id).is_none() {
             self.set_banner(format!(
                 "Process '{}' is not currently managed in this session.",
                 process_id
             ));
             return;
         }
+        // Reloading waits for a running process to stop, so it runs off the frame.
+        let manager = self.manager.clone();
+        let next = updated.clone();
+        std::thread::spawn(move || {
+            manager.reload_process_from_config(next);
+        });
 
         self.config.update_process(process_id, updated.clone());
         self.last_process_error_versions = self.manager.error_versions();
         self.process_row_flashes.remove(process_id);
-        if self
-            .editor
-            .as_ref()
-            .is_some_and(|editor| editor.process_id.as_deref() == Some(process_id))
-        {
+        if self.editor.as_ref().is_some_and(|editor| {
+            editor.process_id.as_deref() == Some(process_id) && !editor.is_dirty()
+        }) {
             self.editor = Some(Editor::for_process(updated));
         }
         self.refresh_runtime_snapshot(true);
@@ -1252,15 +1297,28 @@ impl ProcessManagerApp {
         };
 
         self.manager.set_log_directory(config.log_directory.clone());
-        self.manager.reload_from_config(&config.processes);
+        // Every process stops first (up to five seconds), so the reload runs off the frame.
+        let manager = self.manager.clone();
+        let processes = config.processes.clone();
+        std::thread::spawn(move || manager.reload_from_config(&processes));
         self.config = config;
-        self.editor = None;
+        self.drop_clean_editor();
         self.apply_rest_config();
         self.last_process_error_versions = self.manager.error_versions();
         self.process_row_flashes.clear();
         self.ensure_valid_selection();
         self.refresh_runtime_snapshot(true);
-        self.set_banner("Reloaded processes.json");
+        match self
+            .editor
+            .as_ref()
+            .filter(|e| e.is_dirty())
+            .map(|e| e.name())
+        {
+            Some(name) => self.set_banner(format!(
+                "Reloaded processes.json; your unsaved changes to {name} are kept"
+            )),
+            None => self.set_banner("Reloaded processes.json"),
+        }
     }
 
     fn toggle_api_enabled(&mut self) {
@@ -1366,6 +1424,9 @@ impl ProcessManagerApp {
         self.persist_config();
         if self.selected_process.as_deref() == Some(process_id) {
             self.selected_process = None;
+            self.log_selection = None;
+            self.frozen_log_line = None;
+            self.follow_logs = true;
         }
         self.checked.retain(|selected_id| selected_id != process_id);
         self.ensure_valid_selection();
@@ -1591,11 +1652,14 @@ impl ProcessManagerApp {
                 self.config.update_process(&process_id, process);
             }
         } else {
+            let stack_dirty = self.stack_form.differs_from(&self.config);
             self.config = config;
-            self.stack_form = StackSettingsForm::from_config(&self.config);
+            if !stack_dirty {
+                self.stack_form = StackSettingsForm::from_config(&self.config);
+            }
             self.last_process_error_versions = self.manager.error_versions();
             self.process_row_flashes.clear();
-            self.editor = None;
+            self.drop_clean_editor();
             self.ensure_valid_selection();
         }
         self.refresh_runtime_snapshot(true);
@@ -1673,15 +1737,21 @@ impl ProcessManagerApp {
 
     fn handle_shortcuts(&mut self, ctx: &Context) {
         let typing = ctx.wants_keyboard_input();
+        let modal = self.modal_open();
         let mut actions = Vec::new();
         ctx.input(|input| {
             let cmd = input.modifiers.command;
             let shift = input.modifiers.shift;
             let pressed = |key| input.key_pressed(key);
+            if modal {
+                return;
+            }
             if cmd && pressed(Key::K) {
                 actions.push(Shortcut::Palette);
             }
-            if self.palette.is_some() {
+            // While typing, keys belong to the field: Ctrl+Enter in a command field must not
+            // stop the process, nor Ctrl+Shift+X the stack.
+            if self.palette.is_some() || typing {
                 return;
             }
             if cmd && shift && pressed(Key::S) {
@@ -1702,9 +1772,6 @@ impl ProcessManagerApp {
                 actions.push(Shortcut::Overview);
             } else if cmd && pressed(Key::F) {
                 actions.push(Shortcut::FocusFilter);
-            }
-            if typing {
-                return;
             }
             if pressed(Key::Slash) {
                 actions.push(Shortcut::FocusFilter);
@@ -1745,8 +1812,7 @@ impl ProcessManagerApp {
                 Shortcut::NewProcess => self.open_new_process(),
                 Shortcut::Tab(tab) => {
                     if let Some(id) = self.selected_process.clone() {
-                        self.navigate(Nav::Process(id));
-                        self.set_tab(tab);
+                        self.open_process_tab(id, tab);
                     }
                 }
                 Shortcut::Overview => self.navigate(Nav::Overview),

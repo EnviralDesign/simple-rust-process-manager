@@ -933,6 +933,7 @@ impl ProcessManagerApp {
                     {
                         self.follow_logs = !self.follow_logs;
                         self.jump_to_latest = self.follow_logs;
+                        self.unfollowed_at = self.info_of(&process.id).map_or(0, |i| i.log_total);
                         ui.close();
                     }
                     if widgets::menu_item(

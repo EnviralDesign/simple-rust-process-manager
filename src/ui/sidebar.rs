@@ -530,8 +530,7 @@ impl ProcessManagerApp {
             RowAction::StartStop(id) => self.toggle_process(&id),
             RowAction::Restart(id) => self.restart_process(&id),
             RowAction::Edit(id) => {
-                self.navigate(Nav::Process(id));
-                self.set_tab(ProcessTab::Settings);
+                self.open_process_tab(id, ProcessTab::Settings);
             }
             RowAction::Duplicate(id) => self.duplicate_process(&id),
             RowAction::MoveUp(id) => self.move_process_up(&id),

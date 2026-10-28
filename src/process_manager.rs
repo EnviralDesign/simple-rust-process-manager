@@ -3126,7 +3126,12 @@ fn refresh_docker_status_inner(
                 let mut processes = processes.lock().unwrap();
                 if let Some(state) = processes.get_mut(id) {
                     if is_running {
-                        if state.status != ProcessStatus::Running {
+                        // A container being stopped still reports running until docker stop
+                        // returns; that is not a start.
+                        if !matches!(
+                            state.status,
+                            ProcessStatus::Running | ProcessStatus::Stopping
+                        ) {
                             if state.start_cause.is_empty() {
                                 state.start_cause = "Found running".to_string();
                             }

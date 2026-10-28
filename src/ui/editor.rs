@@ -229,6 +229,14 @@ impl ProcessManagerApp {
         gutter: f32,
     ) {
         self.ensure_editor();
+        // Another draft is waiting on the unsaved-changes question; draw nothing under it.
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|e| e.process_id.as_deref() != Some(process.id.as_str()))
+        {
+            return;
+        }
         let Some(mut editor) = self.editor.take() else {
             return;
         };
@@ -321,6 +329,13 @@ impl ProcessManagerApp {
         match editor.process_id.clone() {
             Some(id) => {
                 let launch_changed = editor.draft.launch_differs(&editor.base);
+                let kind_changed = editor.draft.process_type != editor.base.process_type;
+                // Stopping goes by the kind it was started as, so a running entry whose kind
+                // changes stops first; otherwise it would be orphaned.
+                let stopped_for_kind = kind_changed && self.is_live(&id);
+                if stopped_for_kind {
+                    self.manager.stop_process_by(&id, "Kind changed");
+                }
                 self.config.update_process(&id, process.clone());
                 self.persist_config();
                 let _ = self.manager.update_process_config(process.clone());
@@ -328,7 +343,12 @@ impl ProcessManagerApp {
                     .record_activity(&id, ActivityKind::Settings, "Settings saved", "You");
                 self.editor = Some(Editor::for_process(&process));
                 let running = self.is_live(&id);
-                if restart {
+                if stopped_for_kind {
+                    self.set_banner(format!(
+                        "Saved {}. It was stopped to change its kind; start it again.",
+                        process.name
+                    ));
+                } else if restart {
                     self.restart_process(&id);
                     self.set_banner(format!("Saved {} and restarted it", process.name));
                 } else if running && launch_changed {

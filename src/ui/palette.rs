@@ -197,12 +197,10 @@ impl ProcessManagerApp {
             Command::StartStop(id) => self.toggle_process(&id),
             Command::Restart(id) => self.restart_process(&id),
             Command::Edit(id) => {
-                self.navigate(Nav::Process(id));
-                self.set_tab(ProcessTab::Settings);
+                self.open_process_tab(id, ProcessTab::Settings);
             }
             Command::Activity(id) => {
-                self.navigate(Nav::Process(id));
-                self.set_tab(ProcessTab::Activity);
+                self.open_process_tab(id, ProcessTab::Activity);
             }
             Command::CopyCommand(command, name) => {
                 self.copy_text(&command, format!("Copied the command of {name}"))
