@@ -10,6 +10,7 @@ laid out, the rules the UI follows, how to check a change, and how releases are 
 | `src/main.rs` | Entry: `--normalize-config`, working directory, single instance, then the UI |
 | `src/config.rs` | `processes.json`: load, migrate, save, groups, schedules |
 | `src/process_manager.rs` | Starting, stopping and watching processes and containers; logs, activity, resource sampling, managed restart, the scheduler |
+| `src/terminal/` | Processes run in a terminal: the VT emulator on `vte` (`term.rs`), the session (the pseudo-terminal's handles, the input writer), and the rules that turn its screen into log lines |
 | `src/rest_api.rs` | The optional loopback REST API and the agent skill text |
 | `src/platform.rs`, `src/single_instance.rs` | Data directory, Unix process groups, the Windows instance guard |
 | `src/ui/mod.rs` | The app's state, navigation (`Nav`, `View`, `ProcessTab`), actions, shortcuts, the frame loop |
@@ -19,6 +20,7 @@ laid out, the rules the UI follows, how to check a change, and how releases are 
 | `src/ui/header.rs` | Header, footer, the process switcher for narrow windows, sidebar rows |
 | `src/ui/sidebar.rs` | Sidebar: groups, rows, drag to reorder, context menus |
 | `src/ui/console.rs` | A process's console: head, stats strip, tabs, the log viewer, Activity |
+| `src/ui/screen.rs` | The Screen tab: a terminal's cells, and the keys, paste and mouse sent to it |
 | `src/ui/editor.rs` | Settings in place (also the New process page), validation, the save bar, path suggestions |
 | `src/ui/overview.rs` | The overview table and the stack log |
 | `src/ui/palette.rs` | The command palette |
@@ -79,8 +81,14 @@ architectures, so format before committing and keep `Cargo.lock` in step.
 - `PM_SCREENSHOT=<file.png>`: save one frame, then quit.
 - `PM_SCREENSHOT_AFTER=<seconds>`: let the stack run this long first (default 3).
 - `PM_WINDOW=<width>x<height>`: the window's size at start (and it is not restored from the last run).
-- `PM_OPEN=<view>[:<process>]`: start on `overview`, `stack`, `new`, `settings`, `activity` or
-  `palette` or `delete` (its confirmation), with that process selected.
+- `PM_OPEN=<view>[:<process>]`: start on `overview`, `stack`, `new`, `settings`, `activity`,
+  `screen`, `palette` or `delete` (its confirmation), with that process selected.
+- `PM_TYPE=<keys>`: 1.5 s before the screenshot, focus the selected process's screen and type
+  these keys through the keyboard's path. `{enter}`, `{tab}`, `{esc}`, the arrows (`{up}` …)
+  and `{ctrl-<letter>}` are keys; the rest is text.
+
+Unset `NO_COLOR` before screenshots of terminal processes: Rich and most colour libraries obey it
+(it is passed on to terminal processes, as a user who sets it would expect).
 
 Look at screenshots at a wide and a narrow size before calling a UI change done. Images in
 `images/` are the README's; regenerate them with the commands in the README's Development section
@@ -95,8 +103,32 @@ when the look changes.
   all`, `Auto-start`, `Managed restart #n`, `Schedule`, `Local API`, a group. Keep a cause on new
   call sites; it is what the Activity tab shows.
 - Restarts wait for the stop, so the UI runs them on a thread, never on the frame.
-- Saving settings updates the running process's config in place. A changed command, folder, kind
-  or disk logging applies at the next start; the save bar offers Save and restart for that.
+- Saving settings updates the running process's config in place. A changed command, folder, kind,
+  output (terminal mode) or disk logging applies at the next start; the save bar offers Save and
+  restart for that.
+
+### Terminals
+
+A process's `terminal_mode` (`Off`, `Auto`, `Screen`; absent is `Off`, how every process ran
+before 2.1) picks pipes or a pseudo-terminal (`portable-pty`: ConPTY on Windows, `openpty` on
+macOS). Keep the default `Off` so old configs run unchanged.
+
+- The log comes from the primary screen. A row joins the log as soon as it has text and changes
+  in place while the program redraws it (progress bars, live tables); it is written to disk and
+  checked for errors once it has been still for a second, or when it scrolls off, the screen is
+  cleared, or the process ends. A row erased for good (0.4 s) lets its line go, keeping the text.
+  Rows on screen when a full-screen program takes over are sealed: what replaces them later is a
+  new line. The alternate screen never reaches the log. Tests in `src/terminal/mod.rs` pin these.
+- Lock order is terminal, then processes. Never lock a terminal while holding the manager's lock;
+  `ProcessManager::terminal` hands out the `Arc` for that reason.
+- Closing a Windows pseudo-console waits for its last output, which the reader thread must be
+  free to read: `TerminalSession::detach` hands back the handles to drop outside every lock.
+- New terminals start at the size the UI last measured for the log area (at least 100 × 24, so
+  output is not laid out for a narrow window and stays broken). The Screen tab resizes only
+  full-screen programs and `Screen`-mode processes; `Auto` returns to its starting size when the
+  program leaves the alternate screen.
+- Terminal lines carry colour spans (`LogLine::spans`); their text is plain, so filters, error
+  detection, disk logs and the REST API see plain text.
 
 ## Versions and releases
 

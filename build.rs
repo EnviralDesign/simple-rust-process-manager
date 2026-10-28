@@ -3,6 +3,10 @@ fn main() {
     use std::path::PathBuf;
 
     println!("cargo:rerun-if-changed=assets/icon.png");
+    // Built on Windows for another target (a cross check): no Windows resources to embed.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR missing"));
     let icon_path = out_dir.join("app-icon.ico");

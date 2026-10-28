@@ -95,6 +95,9 @@ pub struct Row {
     pub blank_since: Option<Instant>,
     /// Erased for good: leave it out of the log until something is written to it.
     pub erased: bool,
+    /// On screen when a full-screen program took over. Its log line keeps what it said then: a
+    /// later change (the repaint after the program, rewrapped by a resize) becomes a new line.
+    pub sealed: bool,
 }
 
 impl Row {
@@ -108,6 +111,7 @@ impl Row {
             changed_at: None,
             blank_since: None,
             erased: false,
+            sealed: false,
         }
     }
 
@@ -603,6 +607,9 @@ impl Term {
             let blank = self.blank_row();
             for row in self.alt.iter_mut() {
                 *row = blank.clone();
+            }
+            for row in self.primary.iter_mut() {
+                row.sealed = row.line.is_some();
             }
         } else {
             self.alt_active = false;

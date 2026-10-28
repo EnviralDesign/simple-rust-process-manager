@@ -678,8 +678,8 @@ pub(super) fn encode_key(key: Key, modifiers: Modifiers, app_cursor: bool) -> Op
                 Key::CloseBracket => 0x1d,
                 Key::Num6 => 0x1e,
                 Key::Minus => 0x1f,
-                // Ctrl+V pastes (it arrives as a paste), so it is not a key here.
-                Key::V => return None,
+                // Ctrl+V pastes (it arrives as a paste), except on a Mac, where Command+V does.
+                Key::V if !cfg!(target_os = "macos") => return None,
                 _ => {
                     let name = key.name();
                     let letter = name.chars().next().filter(|_| name.len() == 1)?;

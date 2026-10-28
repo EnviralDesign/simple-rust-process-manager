@@ -70,15 +70,22 @@ pub struct ScreenRun {
 pub struct TerminalSession {
     term: Term,
     parser: vte::Parser,
+    /// The size the terminal started at, which it returns to when a full-screen program it was
+    /// fitted for ends (`restore_size`).
+    start_size: (usize, usize),
+    restore_size: bool,
     input: Option<mpsc::Sender<Vec<u8>>>,
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     reader_done: Option<mpsc::Receiver<()>>,
 }
 
 impl TerminalSession {
+    /// `restore_size`: go back to the starting size when the program leaves the alternate screen
+    /// (Auto mode, whose log is laid out at that size).
     pub fn new(
         cols: usize,
         rows: usize,
+        restore_size: bool,
         master: Box<dyn portable_pty::MasterPty + Send>,
         input: mpsc::Sender<Vec<u8>>,
         reader_done: mpsc::Receiver<()>,
@@ -86,6 +93,8 @@ impl TerminalSession {
         Self {
             term: Term::new(cols, rows),
             parser: vte::Parser::new(),
+            start_size: (cols, rows),
+            restore_size,
             input: Some(input),
             master: Some(master),
             reader_done: Some(reader_done),
@@ -94,8 +103,13 @@ impl TerminalSession {
 
     /// Runs the program's output through the emulator.
     pub fn feed(&mut self, bytes: &[u8]) {
+        let was_alt = self.term.alt_active();
         self.parser.advance(&mut self.term, bytes);
         self.term.revision += 1;
+        if was_alt && !self.term.alt_active() && self.restore_size {
+            let (cols, rows) = self.start_size;
+            self.resize(cols, rows);
+        }
         if !self.term.replies.is_empty() {
             let replies = std::mem::take(&mut self.term.replies);
             self.send(replies);
@@ -254,6 +268,20 @@ fn sync_row(row: &mut Row, sink: &mut dyn LogSink, now: Instant, in_text: bool) 
         return;
     }
     let (text, spans) = row.text_and_spans();
+    if row.sealed && row.shown.as_deref() != Some(text.as_str()) {
+        // Keep the line as it was before the full-screen program; what the row shows now is
+        // new output (or nothing).
+        if let Some(shown) = row.shown.take().filter(|s| !s.is_empty()) {
+            if row.written != Some(hash_text(&shown)) {
+                sink.settle(&shown);
+            }
+        }
+        row.line = None;
+        row.written = None;
+        row.blank_since = None;
+        row.sealed = false;
+        row.erased = text.is_empty();
+    }
     if text.is_empty() {
         match row.line {
             // Had text: keep it in the log a moment, in case this is a redraw.
@@ -471,6 +499,18 @@ mod tests {
         assert_eq!(h.log.lines, ["1", "2", "3", "4", "after clear"]);
         h.sync(20, true);
         assert_eq!(h.log.settled, ["1", "2", "3", "4", "after clear"]);
+    }
+
+    #[test]
+    fn lines_from_before_a_full_screen_program_survive_its_repaint() {
+        let mut h = Harness::new(20, 4);
+        h.feed("build ok\r\nserving\r\n", 0);
+        h.feed("\x1b[?1049h\x1b[Hmenu", 10);
+        // The repaint after the program: the old rows erased and rewritten differently.
+        h.feed("\x1b[?1049l\x1b[H\x1b[2K\x1b[2;1H\x1b[2K\x1b[Hbye", 20);
+        h.sync(1000, false);
+        assert_eq!(h.log.lines, ["build ok", "serving", "bye"]);
+        assert!(h.log.settled.contains(&"serving".to_string()));
     }
 
     #[test]

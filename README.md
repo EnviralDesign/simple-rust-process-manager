@@ -40,6 +40,18 @@ Each process gets a console: its status in plain words, the command and where it
 - Click a line to select it, Shift-click for a range, Ctrl/Command+C to copy; double-click a line to select its text.
 - Output is kept across restarts, so a crash's traceback is still there after managed restart brings the process back.
 
+### Terminals
+
+Tools with rich output (Python's Rich, progress bars from pip, cargo or npm, coloured test runners) and full-screen programs (Textual apps, htop, lazygit, REPLs) check whether they are talking to a terminal. Through plain pipes they are not, so they drop their colour, hold back their progress bars, buffer their output or refuse to start. A process's **Output** setting can run it in a terminal instead (ConPTY on Windows, a pseudo-terminal on macOS) that Process Manager emulates:
+
+- **Plain output**: pipes, as before. The default, and what every `processes.json` without the setting gets.
+- **Terminal**: the log keeps the program's colours, and a progress bar or a live table updates its line in place instead of printing a hundred copies. When the program goes full screen, the console switches to its **Screen** tab, and back to the log when it leaves.
+- **Terminal, opens on its screen**: for interactive tools. The console opens on the Screen tab.
+
+![Terminal output](images/terminal.png)
+
+The Screen tab draws the program's screen. Click it to type: keys, paste and the mouse go to the program, and the window's shortcuts wait until you click outside the screen. **Ctrl C** interrupts it, **Copy screen** copies its text. A terminal process's lines still reach the log (rows that scroll by, or have been still for a moment, are written to disk and checked for errors); what a full-screen program draws does not. New terminals start at the size of the log area (at least 100 × 24); full-screen programs follow the Screen tab's size.
+
 ### Overview
 
 Every process in one table under its group, with a filter, state chips, group controls and checkbox bulk actions. The stack log underneath merges every process's output by time.
@@ -271,7 +283,8 @@ Example:
       "respond_to_stop_all": true,
       "respond_to_restart_all": true,
       "log_to_disk": true,
-      "log_rotation_count": 10
+      "log_rotation_count": 10,
+      "terminal_mode": "Auto"
     },
     {
       "id": "uuid-here",
@@ -302,6 +315,7 @@ Notes:
 - `scheduled_run` only starts entries that are not already running; default fields are omitted when possible
 - `startup_delay_seconds` waits before honoring any start request for that entry and defaults to `0`
 - `respond_to_start_all`, `respond_to_stop_all`, and `respond_to_restart_all` default to `true` for older configs
+- `terminal_mode` is `Off` (pipes), `Auto` (a terminal; the console follows full-screen programs) or `Screen` (a terminal that opens on its screen); it is omitted when `Off`, and a config without it runs every process through pipes as before 2.1. It applies to processes, not Docker containers; a terminal process gets `TERM=xterm-256color` and `COLORTERM=truecolor`, and a `NO_COLOR` you set is passed on
 - older config versions are migrated automatically on startup
 
 ## Local REST API
@@ -361,6 +375,8 @@ Ctrl on Windows, Command on macOS.
 | `↑` `↓` | Previous or next process |
 | `Ctrl+C` | Copy the selected log lines |
 | `Escape` | Clear the line selection, then the process selection |
+
+While a terminal process's screen has focus, every key goes to the program instead (Ctrl+C interrupts it, Ctrl+V pastes); click outside the screen to get the shortcuts back.
 
 Version 2.0 moved Start all, Stop all and Restart all from `Ctrl+S`, `Ctrl+X` and `Ctrl+R` to `Ctrl+Shift+S`, `X` and `R`, so a stray Cut or Save no longer stops the stack; `Ctrl+R` now restarts only the selected process.
 

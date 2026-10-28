@@ -711,7 +711,7 @@ impl ProcessManager {
             let spawned = if config_clone.terminal_mode == TerminalMode::Off {
                 spawn_piped(&program, &args, &working_dir)
             } else {
-                spawn_terminal(&program, &args, &working_dir)
+                spawn_terminal(&program, &args, &working_dir, config_clone.terminal_mode)
             };
             let (mut child, output, program_label) = match spawned {
                 Ok(spawned) => spawned,
@@ -2964,6 +2964,7 @@ fn spawn_terminal(
     program: &str,
     args: &[String],
     working_dir: &str,
+    mode: TerminalMode,
 ) -> Result<(ManagedChild, Output, String), String> {
     let (program, args, program_label) = command_parts(program, args, working_dir)?;
     let size = terminal_size_for_start();
@@ -2973,6 +2974,9 @@ fn spawn_terminal(
     let terminal = Arc::new(Mutex::new(TerminalSession::new(
         size.0,
         size.1,
+        // Auto mode lays its log out at the starting size; a full-screen program fitted to the
+        // Screen tab gives it back when it ends.
+        mode == TerminalMode::Auto,
         master,
         input,
         reader_done,

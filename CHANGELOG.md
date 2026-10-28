@@ -2,6 +2,32 @@
 
 Versions follow [Semantic Versioning](https://semver.org); see `AGENTS.md` for the rules.
 
+## Unreleased
+
+Planned as 2.1.0: new features, and existing `processes.json` files run exactly as before.
+
+### New
+
+- Terminals. A process's new **Output** setting runs it in a terminal (ConPTY on Windows, a
+  pseudo-terminal on macOS) instead of pipes, so tools that check for one behave as they do in a
+  shell: Rich, coloured loggers and test runners keep their colours, progress bars from pip,
+  cargo, npm or Rich update one line in place, and Python flushes its output as it goes.
+  - **Terminal**: the log keeps colour and redraws; when the program goes full screen (a Textual
+    app, htop, a TUI), the console switches to its **Screen** and back when it leaves.
+  - **Terminal, opens on its screen**: for interactive tools such as REPLs and prompts.
+- The Screen tab: the program's screen as it draws it, with typing, paste, the mouse and Ctrl+C
+  going to it while it has focus (the window's shortcuts wait meanwhile). Copy screen copies its
+  text. A program that has ended leaves its last screen.
+- The command palette shows a terminal process's screen and sends it Ctrl+C.
+- The console's badges say when a process runs in a terminal.
+- `PM_OPEN=screen` and `PM_TYPE` (keys typed into a screen) for screenshots and checks.
+- The demo stack's nightly backfill runs in a terminal.
+
+### Changed
+
+- Nothing for existing configs: a process without `terminal_mode` (every config before this)
+  runs through pipes as it always did, and `Off` is never written back.
+
 ## 2.0.0
 
 The redesign. Process Manager gets a new look and a new way around, and the runtime keeps more of
