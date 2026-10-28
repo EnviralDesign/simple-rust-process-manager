@@ -14,121 +14,104 @@ It is built for the annoying real-world cases:
 
 ## Why Use It
 
-- Start your full local stack from one UI instead of juggling terminals.
-- Watch live output for the selected process without leaving the app.
-- Auto-start only the processes you opt into when the manager itself launches.
-- Restart unstable services automatically with per-process managed restart and optional active hours.
+- Start your full local stack from one window instead of juggling terminals.
+- Watch live, searchable output for any process, with errors and warnings picked out.
+- See the whole stack at once: what runs, what crashed, what it costs in CPU and memory.
+- Restart unstable services automatically with managed restart and optional active hours.
 - Start dormant services from simple per-process schedules.
-- Organize related processes into one-layer groups with expand/collapse and aggregate CPU/RAM.
+- Organize related processes into one-layer groups with aggregate CPU/RAM and group controls.
 - Stop process trees on Windows and macOS, including child-process chains.
 - Mix normal commands and Docker containers in the same stack.
 - Expose an optional localhost-only REST API for tooling and AI agents.
+- Do everything from the keyboard: Ctrl/Command+K opens a command palette.
 
 ## What It Looks Like
 
-### Main Workspace
+### Console
 
-The main view is built for daily use: left-side process list, top-level stack controls, and live logs for the selected process.
+Each process gets a console: its status in plain words, the command and where it runs, what it is set to do, live CPU, memory, uptime, PID and restarts, and its log.
 
-![Main Workspace](images/image1.png)
+![Console](images/console.png)
 
-Highlights visible here:
+- Status reads as a sentence: `Running`, `Exited with code 1 · restarting`, `Scheduled · next 02:00`, `Failed to start`.
+- Logs show line numbers and times; stderr is tagged `err` instead of prefixed, so a server that logs INFO to stderr no longer looks broken.
+- Chips filter errors, warnings and Process Manager's own events, with counts; the filter field searches and highlights.
+- Follow keeps the newest line in view and lets go when you scroll up; a "new lines" button brings you back.
+- Click a line to select it, Shift-click for a range, Ctrl/Command+C to copy; double-click a line to select its text.
+- Output is kept across restarts, so a crash's traceback is still there after managed restart brings the process back.
 
-- `(M)` marks entries with managed restart enabled
-- `(A)` marks entries that auto-start when the app launches
-- `Start All`, `Stop All`, and `Restart All` control entries that opt into each global action
-- Shift-select process rows to build one-layer groups; group rows expand/collapse and show aggregate CPU/RAM
-- drag any process in the sidebar to reorder it; a live insertion line previews where the row will land when dropped, or use right-click move actions
-- the selected process shows live output with warning/error color differentiation
-- the header can expose a loopback API and copy an agent bootstrap payload
+### Overview
 
-### Edit Process
+Every process in one table under its group, with a filter, state chips, group controls and checkbox bulk actions. The stack log underneath merges every process's output by time.
 
-Each process entry can be updated in place. You do not need to delete and recreate it to change behavior.
+![Overview](images/overview.png)
 
-![Edit Process](images/image2.png)
+### Settings, in place
 
-This screen covers:
+A process's settings are a tab of its console, not a dialog. Changes collect until you save them; leaving with unsaved changes asks first. The active-hours grid takes clicks and drags.
 
-- command and working directory changes
-- process vs Docker mode
-- auto-start with app launch
-- managed restart with optional active-hours windows
-- scheduled start triggers for dormant entries
-- Start All / Stop All / Restart All participation
-- disk log capture and retention
+![Settings](images/settings.png)
 
-### Global Settings: Process Manager
+### Activity
 
-Stack-wide settings stay out of the way but are easy to find.
+What happened to a process this session, and what caused it: auto-start, Start all, you, the local API, managed restart, the schedule.
 
-![Global Settings - Process Manager](images/image3.png)
+![Activity](images/activity.png)
 
-This panel controls:
+### Command palette
 
-- stack name
-- shared log directory
-- portable layout for logs next to the executable when desired
+Ctrl/Command+K finds any process or action by name.
 
-### Global Settings: Local API
+![Command palette](images/palette.png)
 
-The app can optionally expose a loopback-only control surface for local tooling.
+### Stack settings
 
-![Global Settings - Local API](images/image4.png)
+Stack name, log folder, error flash, the local API and the config file, edited in place.
 
-This panel controls:
+![Stack settings](images/stack-settings.png)
 
-- localhost REST enable/disable
-- port selection
-- agent/tooling access without exposing the service on the network
+### Small windows
+
+The layout steps down as the window narrows. Below 760 points the sidebar folds into a switcher in the header and the console leads with the status; the command and badges wait behind Details; the stats strip steps aside in short windows; log chips and toggles fold into menus. The log keeps the room.
+
+![Compact window](images/compact.png)
 
 ## Core Functionality
 
 ### Stack Control
 
-- Start, stop, and restart the whole stack from the header.
-- Start, stop, restart, edit, or delete individual entries from the process pane.
-- Reorder processes from the sidebar by dragging them; while dragging, an insertion line previews the drop position, or use the right-click `Move up` / `Move down` menu.
-- Keep one-off/manual entries independent by disabling their Start All, Stop All, and Restart All participation.
+- Start, stop, and restart the whole stack from the header (or Ctrl/Command+Shift+S, X, R).
+- Start, stop, restart, edit, duplicate or delete individual entries from the console, the sidebar's context menu, the overview, or the palette.
+- Reorder processes by dragging them in the sidebar; a line previews where the row lands.
+- Keep one-off entries independent by turning off their Start all, Stop all and Restart all participation; the badges say which a process skips.
 - Keep a mixed stack of regular commands and Docker containers in one place.
 
 ### Groups
 
-- Expand and collapse group rows to keep long stacks readable.
-- See aggregate CPU/RAM for each group row at a glance.
-- Start, stop, or restart a group through the UI or the REST API; each action honors its members' matching stack-control setting.
-
-### Live Logs
-
-- Stream output for the selected process in real time.
-- Visually differentiate system events, warnings, errors, and normal output.
-- Keep the log view pinned to the bottom while new lines arrive.
-- Click log rows to select whole lines; Shift-click selects a row range for structured copying.
-- Double-click a log row to freeze it and enable text selection for that row only; click outside to return to row selection.
+- Shift-click (or Ctrl/Command-click) processes in the sidebar, or check them in the overview, then Make a group.
+- Group headers collapse, show running counts and aggregate CPU/RAM, and offer Start, Stop and Restart, each honoring its members' matching stack-control setting.
+- Rename or ungroup from the group's menu.
 
 ### Resilience
 
-- Enable managed restart per entry for processes that should come back automatically.
-- Limit managed restart to weekly active-hour windows, with an option to stop the process when a window ends.
-- Enable scheduled runs for dormant entries with hourly, every-N-hours, daily, or selected-weekday cadence.
-- Enable auto-start per entry when you want the stack to come up automatically after Process Manager launches.
-- Disable global Start All, Stop All, or Restart All participation per entry without affecting manual controls, auto-start, or managed restart.
-- On Windows, stop process trees with Job Objects. On macOS, each managed command runs in its own process group; stopping sends SIGTERM, then SIGKILL after a one-second grace period. Remaining group members are also cleaned up when the root process exits.
-- Keep Docker behavior explicit: regular processes are shut down on app close, containers persist unless you stop them.
+- Managed restart brings an entry back whenever it exits, optionally only within weekly active hours, and optionally stops it when the hours end.
+- Scheduled runs start dormant entries hourly, every N hours, daily, or on chosen weekdays.
+- Auto-start brings entries up when Process Manager launches, after an optional startup delay.
+- On Windows, process trees stop with Job Objects. On macOS, each managed command runs in its own process group; stopping sends SIGTERM, then SIGKILL after a one-second grace period.
+- Docker behavior stays explicit: regular processes are shut down on app close, containers persist unless you stop them.
 
 ### Configuration Without Friction
 
 - Store config in a portable `processes.json` next to the executable or Mac `.app`; Mac apps installed in Applications use Application Support.
-- Edit existing entries in place.
-- Edit one-layer groups in the top-level `groups` array alongside `processes`.
+- Edit entries in place; relative working folders are offered when a folder sits near the executable, so a stack can move as a folder.
 - Persist logs to disk per process, with configurable retention.
 - Migrate older config files forward automatically.
 
 ### Tooling and Automation
 
 - Enable a localhost-only REST API for scripts, dashboards, and agents.
-- Copy an agent bootstrap block that includes host, port, endpoints, and process ids.
-- Use stable process ids for reliable external control.
+- Copy an agent skill that includes the address, endpoints, and process ids.
+- Use stable process ids for reliable external control; actions taken through the API show as "Local API" in a process's activity.
 - Edit the `groups` array in `processes.json` and call `POST /stack/reload` to apply changes.
 
 ## Quick Start
@@ -213,7 +196,7 @@ The script signs with hardened runtime, submits the app to Apple, staples and va
 
 ### Automated builds and releases
 
-`.github/workflows/build.yml` tests and packages Windows, Apple Silicon macOS, and Intel macOS for pushes and pull requests. Each job uploads its ZIP. Pushing a `v*` tag assembles the successful builds into a draft GitHub release for review. Mac CI artifacts are ad-hoc signed; run the signing/notarization flow above before public distribution. `Cargo.lock` is committed so these builds use the same dependency versions.
+`.github/workflows/build.yml` tests and packages Windows, Apple Silicon macOS, and Intel macOS for pushes and pull requests. Each job uploads its ZIP. Pushing a `v*` tag assembles the successful builds into a draft GitHub release for review; the tag must match the version in `Cargo.toml` and have an entry in `CHANGELOG.md` (see `AGENTS.md`). Mac CI artifacts are ad-hoc signed; run the signing/notarization flow above before public distribution. `Cargo.lock` is committed so these builds use the same dependency versions.
 
 Windows packaging can also be run locally:
 
@@ -223,21 +206,11 @@ Windows packaging can also be run locally:
 
 ## Basic Workflow
 
-1. Launch the app. If `processes.json` does not exist in the configuration directory, it will be created. See the macOS section below for bundled-app paths.
-2. Click `Add` to create a process entry.
-3. Choose a type:
-   - `Process` for normal commands like `npm run dev` or `uv run dev`
-   - `Docker` for container names controlled through Docker
-4. Optionally enable:
-   - auto-start with app launch
-   - managed restart
-   - managed restart active hours
-   - scheduled run
-   - Start All / Stop All / Restart All participation
-   - disk logging
-5. Select a process in the left sidebar to watch its logs.
-6. Drag a process in the sidebar, or right-click it, if you want to move it in the list.
-7. Use stack-wide controls in the header when you want to bring everything up or down together.
+1. Launch the app. If `processes.json` does not exist in the configuration directory, it is created. See the macOS section for bundled-app paths.
+2. Click `+` beside Processes (or press Ctrl/Command+N) to add an entry: a name, then a command or a Docker container name. Everything else can wait.
+3. Start it from its console, or let auto-start, Start all or a schedule do it.
+4. Watch its log in the console; open Settings beside Logs to change how it starts, restarts and logs.
+5. Open Overview for the whole stack, or press Ctrl/Command+K to jump anywhere.
 
 ## Command Model
 
@@ -371,22 +344,43 @@ Notes:
 
 ## Keyboard Shortcuts
 
+Ctrl on Windows, Command on macOS.
+
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl/Command+N` | Add new process |
-| `Ctrl/Command+S` | Start all processes |
-| `Ctrl/Command+X` | Stop all processes |
-| `Ctrl/Command+R` | Restart all processes |
-| `Ctrl/Command+C` | Copy selected log rows when row selection is active |
-| `Escape` | Clear log row selection |
+| `Ctrl+K` | Command palette |
+| `Ctrl+Enter` | Start or stop the selected process |
+| `Ctrl+R` | Restart the selected process |
+| `Ctrl+Shift+S` | Start all |
+| `Ctrl+Shift+X` | Stop all |
+| `Ctrl+Shift+R` | Restart all |
+| `Ctrl+N` | Add a process |
+| `Ctrl+,` | The selected process's settings |
+| `Ctrl+0` | Overview |
+| `Ctrl+F` or `/` | Filter the log |
+| `↑` `↓` | Previous or next process |
+| `Ctrl+C` | Copy the selected log lines |
+| `Escape` | Clear the line selection, then the process selection |
+
+Version 2.0 moved Start all, Stop all and Restart all from `Ctrl+S`, `Ctrl+X` and `Ctrl+R` to `Ctrl+Shift+S`, `X` and `R`, so a stray Cut or Save no longer stops the stack; `Ctrl+R` now restarts only the selected process.
 
 ## Development
 
 ```bash
 cargo run
 cargo test
+cargo fmt --all -- --check
 cargo build --release
 ```
+
+`scripts/run-demo.ps1` runs the app against a demo stack (PowerShell scripts that log like an API, a worker, a dev server and a feed that keeps crashing) without touching your own `processes.json`, and takes screenshots:
+
+```powershell
+./scripts/run-demo.ps1
+./scripts/run-demo.ps1 -Screenshot images/overview.png -Window 1440x900 -Open overview -After 12
+```
+
+See `AGENTS.md` for how the code is laid out, the UI kit's rules and how releases are versioned.
 
 ## Troubleshooting Windows Rendering
 
@@ -419,7 +413,7 @@ $env:PM_DIAGNOSTICS = "true"
 - `egui` / `eframe`: immediate-mode desktop UI
 - `Tokio`: async runtime and background orchestration
 - `Serde`: config persistence
-- `portable-pty`: process output capture
+- `Inter` and `Cascadia Mono`: the interface and log typefaces (SIL Open Font License)
 - `Axum`: optional localhost REST API
 
 ## License

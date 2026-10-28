@@ -8,6 +8,23 @@ on:
 permissions:
   contents: read
 jobs:
+  version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches Cargo.toml and CHANGELOG.md
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag v$tag does not match Cargo.toml version $version"
+            exit 1
+          fi
+          if ! grep -q "^## $version\$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## $version' entry"
+            exit 1
+          fi
   build:
     strategy:
       fail-fast: false
@@ -41,7 +58,7 @@ jobs:
           if-no-files-found: error
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
