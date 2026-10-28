@@ -1061,23 +1061,36 @@ impl ProcessManagerApp {
         let wrap = self.wrap_logs;
         let wrap_width = (inner.width() - text_left - 14.0).max(80.0);
 
-        // Lay out every visible line's text once.
-        let jobs: Vec<std::sync::Arc<egui::Galley>> = filtered
-            .iter()
-            .map(|(_, _, _, kind, text)| {
-                let job = line_job(
-                    text,
-                    *kind,
-                    &words,
-                    if wrap { Some(wrap_width) } else { None },
-                );
-                log_ui.fonts_mut(|f| f.layout_job(job))
-            })
-            .collect();
+        // Wrapped lines need their layout for their height, so all are laid out; unwrapped
+        // lines are one row each, so only the rows in view are laid out (the width comes from
+        // the longest line, the font being monospaced).
+        let layout = |ui: &Ui, text: &str, kind: LineKind| {
+            let job = line_job(
+                text,
+                kind,
+                &words,
+                if wrap { Some(wrap_width) } else { None },
+            );
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        let wrapped: Vec<std::sync::Arc<egui::Galley>> = if wrap {
+            filtered
+                .iter()
+                .map(|(_, _, _, kind, text)| layout(&log_ui, text, *kind))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let char_w = widgets::galley(&log_ui, "0", mono(12.0), LOG_TEXT).size().x;
         let content_w = if wrap {
             inner.width()
         } else {
-            jobs.iter().map(|g| g.size().x).fold(0.0, f32::max) + text_left + 24.0
+            let longest = filtered
+                .iter()
+                .map(|c| c.4.chars().count())
+                .max()
+                .unwrap_or(0);
+            longest as f32 * char_w + text_left + 24.0
         };
 
         let mut clicked: Option<(u64, bool)> = None;
@@ -1099,11 +1112,10 @@ impl ProcessManagerApp {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             ui.add_space(6.0);
             let (lo, hi) = selected.unwrap_or((u64::MAX, 0));
-            for ((number, line, stream, kind, _), galley) in filtered.iter().zip(jobs.iter()) {
-                let height = if wrap {
-                    galley.size().y.max(LOG_ROW_HEIGHT - 4.0) + 4.0
-                } else {
-                    LOG_ROW_HEIGHT
+            for (index, (number, line, stream, kind, text)) in filtered.iter().enumerate() {
+                let height = match wrapped.get(index) {
+                    Some(galley) => galley.size().y.max(LOG_ROW_HEIGHT - 4.0) + 4.0,
+                    None => LOG_ROW_HEIGHT,
                 };
                 let (rect, response) = ui.allocate_exact_size(
                     vec2(content_w.max(ui.available_width()), height),
@@ -1112,9 +1124,12 @@ impl ProcessManagerApp {
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
+                let galley = match wrapped.get(index) {
+                    Some(galley) => galley.clone(),
+                    None => layout(ui, text, *kind),
+                };
                 let painter = ui.painter();
                 let is_selected = *number >= lo && *number <= hi;
-                let row_x = rect.x_range();
                 if is_selected {
                     painter.rect_filled(rect, CornerRadius::ZERO, theme::accent_soft());
                     painter.rect_filled(
@@ -1132,7 +1147,6 @@ impl ProcessManagerApp {
                 } else if response.hovered() {
                     painter.rect_filled(rect, CornerRadius::ZERO, HOVER);
                 }
-                let _ = row_x;
                 let top = rect.top() + 10.0;
                 let number_color = if is_selected {
                     TEXT
@@ -1191,7 +1205,7 @@ impl ProcessManagerApp {
                         .selectable(true),
                     );
                 } else {
-                    ui.painter().galley(text_pos, galley.clone(), LOG_TEXT);
+                    ui.painter().galley(text_pos, galley, LOG_TEXT);
                 }
                 if response.double_clicked() {
                     double = Some(*number);
