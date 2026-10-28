@@ -2845,9 +2845,9 @@ fn finish_terminal(
     processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
     id: &str,
 ) -> bool {
-    let detached = terminal.lock().unwrap().detach();
+    let detached = crate::terminal::lock(&terminal).detach();
     detached.close(TERMINAL_DRAIN);
-    let mut session = terminal.lock().unwrap();
+    let mut session = crate::terminal::lock(&terminal);
     sync_terminal(&mut session, terminal, processes, id, true).unwrap_or(false)
 }
 
@@ -2872,7 +2872,7 @@ fn pump_terminal(
                 Ok(read) => read,
             };
             let synced = {
-                let mut session = terminal.lock().unwrap();
+                let mut session = crate::terminal::lock(&terminal);
                 session.feed(&buffer[..read]);
                 sync_terminal(&mut session, &terminal, &processes, &id, false)
             };
@@ -2914,9 +2914,9 @@ impl Output {
             reader, terminal, ..
         } = self
         {
-            // Close our end of the output first, so closing the terminal cannot wait on it.
+            // Nobody reads this start's output; it was cancelled before writing much.
             drop(reader);
-            let detached = terminal.lock().unwrap().detach();
+            let detached = crate::terminal::lock(&terminal).detach();
             detached.close(Duration::ZERO);
         }
     }
@@ -3091,7 +3091,7 @@ fn monitor_child(
             }
         };
         if let Some(terminal) = &terminal {
-            let mut session = terminal.lock().unwrap();
+            let mut session = crate::terminal::lock(&terminal);
             if session.is_live()
                 && sync_terminal(&mut session, terminal, &processes, &id, false) == Some(true)
             {

@@ -13,7 +13,7 @@ pub mod term;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 pub use term::{InputModes, MouseMode, Style, TermColor};
@@ -203,6 +203,12 @@ impl TerminalSession {
     }
 }
 
+/// Locks a session even if a thread panicked while holding it: the screen may be odd, but the
+/// window keeps drawing and the process can still be stopped and its log kept.
+pub fn lock(session: &Mutex<TerminalSession>) -> MutexGuard<'_, TerminalSession> {
+    session.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The handles a session gives up when its process ends.
 pub struct Detached {
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
@@ -238,16 +244,19 @@ fn sync_term(term: &mut Term, sink: &mut dyn LogSink, now: Instant, finish: bool
         sync_row(&mut row, sink, now, true);
         settle_row(&mut row, sink, now, true);
     }
-    // The primary screen does not change while a full-screen program has the alternate one.
-    if term.alt_active() && !finish {
-        return;
-    }
+    // The primary screen is synced even while a full-screen program has the alternate one: it
+    // does not change then, but rows written just before the switch still have to reach the log.
+    let full_screen = term.alt_active();
     let rows = term.primary_mut();
     let last = rows.iter().rposition(|row| !row.is_blank());
     for (index, row) in rows.iter_mut().enumerate() {
         let in_text = last.is_some_and(|last| index <= last);
         sync_row(row, sink, now, in_text);
         settle_row(row, sink, now, finish);
+        // Logged while a full-screen program runs: sealed like the rows before it.
+        if full_screen {
+            row.sealed |= row.line.is_some();
+        }
     }
 }
 
@@ -511,6 +520,39 @@ mod tests {
         h.sync(1000, false);
         assert_eq!(h.log.lines, ["build ok", "serving", "bye"]);
         assert!(h.log.settled.contains(&"serving".to_string()));
+    }
+
+    #[test]
+    fn lines_written_as_a_program_goes_full_screen_survive_a_shrink() {
+        let mut h = Harness::new(20, 6);
+        // One chunk, not synced before the Screen tab shrinks the terminal.
+        h.parser.advance(
+            &mut h.term,
+            b"l1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\nl7\r\nERROR last\x1b[?1049h",
+        );
+        h.term.resize(20, 3);
+        h.feed("\x1b[?1049l", 10);
+        h.term.resize(20, 6);
+        h.sync(5000, true);
+        assert_eq!(
+            h.log.lines,
+            ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "ERROR last"]
+        );
+        assert!(h.log.settled.contains(&"ERROR last".to_string()));
+    }
+
+    #[test]
+    fn narrowing_never_cuts_a_logged_line() {
+        let mut h = Harness::new(40, 6);
+        h.feed("this is a fairly long line of text 36\r\n", 0);
+        h.sync(2000, false);
+        h.term.resize(20, 6);
+        h.sync(4000, false);
+        assert_eq!(h.log.lines, ["this is a fairly long line of text 36"]);
+        assert_eq!(h.log.settled, ["this is a fairly long line of text 36"]);
+        // What the program draws at the new width is new output.
+        h.feed("\x1b[1;1Hthis is a fairly lon", 4100);
+        assert_eq!(h.log.lines.len(), 2);
     }
 
     #[test]

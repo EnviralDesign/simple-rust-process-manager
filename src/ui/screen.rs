@@ -135,7 +135,7 @@ impl ProcessManagerApp {
         // keeps the size it started with, so its lines are not rewrapped.
         let mut snapshot = None;
         if let Some(terminal) = &terminal {
-            let mut session = terminal.lock().unwrap();
+            let mut session = crate::terminal::lock(&terminal);
             let live = session.is_live();
             let fit =
                 live && (session.alt_active() || process.terminal_mode == TerminalMode::Screen);
@@ -302,7 +302,7 @@ impl ProcessManagerApp {
                 .clicked()
         {
             if let Some(terminal) = self.manager.terminal(&process.id) {
-                let text = terminal.lock().unwrap().screen_text();
+                let text = crate::terminal::lock(&terminal).screen_text();
                 self.copy_text(&text, "Copied the screen");
             }
         }
@@ -319,7 +319,7 @@ impl ProcessManagerApp {
 
     pub(super) fn send_to_terminal(&self, process_id: &str, bytes: Vec<u8>) {
         if let Some(terminal) = self.manager.terminal(process_id) {
-            terminal.lock().unwrap().send(bytes);
+            crate::terminal::lock(&terminal).send(bytes);
         }
     }
 
@@ -428,7 +428,10 @@ impl ProcessManagerApp {
         };
         let modes = snapshot.modes;
         let events = ui.input(|i| i.events.clone());
-        let held_alt = ui.input(|i| i.modifiers.alt && !i.modifiers.ctrl);
+        // Alt types text on its own as Meta, except on a Mac, where Option is for characters.
+        let held_alt =
+            !cfg!(target_os = "macos") && ui.input(|i| i.modifiers.alt && !i.modifiers.ctrl);
+        let (c_down, x_down) = ui.input(|i| (i.key_down(Key::C), i.key_down(Key::X)));
         let cell_at = |pos: Pos2| {
             let col = ((pos.x - origin.x) / char_w).floor().max(0.0) as usize;
             let row = ((pos.y - origin.y) / row_h).floor().max(0.0) as usize;
@@ -461,10 +464,11 @@ impl ProcessManagerApp {
                         out.extend(text.as_bytes());
                     }
                 }
-                // Ctrl+C and Ctrl+X arrive as copy and cut. On a Mac, Command+C copies and
-                // Control+C reaches the program as a key.
-                Event::Copy if !cfg!(target_os = "macos") => out.push(0x03),
-                Event::Cut if !cfg!(target_os = "macos") => out.push(0x18),
+                // Ctrl+C and Ctrl+X arrive as copy and cut (so do Ctrl+Insert and Shift+Delete,
+                // which stay out of the program). On a Mac, Command+C copies and Control+C
+                // reaches the program as a key.
+                Event::Copy if !cfg!(target_os = "macos") && c_down => out.push(0x03),
+                Event::Cut if !cfg!(target_os = "macos") && x_down => out.push(0x18),
                 Event::PointerButton {
                     pos,
                     button,
@@ -576,7 +580,6 @@ pub(super) fn typed_events(keys: &str) -> Vec<Event> {
                 "down" => Some(key(Key::ArrowDown, Modifiers::NONE)),
                 "left" => Some(key(Key::ArrowLeft, Modifiers::NONE)),
                 "right" => Some(key(Key::ArrowRight, Modifiers::NONE)),
-                "ctrl-c" => Some(Event::Copy),
                 _ => name
                     .strip_prefix("ctrl-")
                     .and_then(|letter| Key::from_name(&letter.to_ascii_uppercase()))
@@ -691,8 +694,9 @@ pub(super) fn encode_key(key: Key, modifiers: Modifiers, app_cursor: bool) -> Op
             };
             alt(vec![byte])
         }
-        // Alt with a letter or digit is Escape then the character (the text event is dropped).
-        _ if modifiers.alt && !modifiers.ctrl => {
+        // Alt with a letter or digit is Escape then the character (its text event is dropped).
+        // Not on a Mac, where Option types characters (@, [, { on many layouts).
+        _ if modifiers.alt && !modifiers.ctrl && !cfg!(target_os = "macos") => {
             let name = key.name();
             let c = name.chars().next().filter(|_| name.len() == 1)?;
             if !c.is_ascii_alphanumeric() {

@@ -285,32 +285,56 @@ impl Term {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        // Where each screen's cursor is: the live one, or the one saved when it was left.
+        let primary_cursor = if self.alt_active {
+            self.saved_primary.map_or(0, |c| c.row)
+        } else {
+            self.cursor.row
+        };
+        let alt_cursor = if self.alt_active { self.cursor.row } else { 0 };
+        let mut primary_from_top = 0;
         for (screen, is_primary) in [(&mut self.primary, true), (&mut self.alt, false)] {
             for row in screen.iter_mut() {
                 if row.cells.len() != cols {
-                    if cols < row.cells.len() {
+                    if cols < row.cells.len() && row.cells[cols - 1].width == 2 {
                         // A wide character cut in half loses both halves.
-                        if row.cells[cols - 1].width == 2 {
-                            row.cells[cols - 1] = Cell::blank(row.cells[cols - 1].style);
-                        }
+                        row.cells[cols - 1] = Cell::blank(row.cells[cols - 1].style);
                     }
                     row.cells.resize(cols, Cell::blank(Style::default()));
-                    row.dirty = true;
-                }
-            }
-            let is_active = is_primary != self.alt_active;
-            if rows < screen.len() {
-                // Keep the cursor's row on screen: rows above it go first, then rows below.
-                let cursor_row = if is_active { self.cursor.row } else { 0 };
-                let from_top = (cursor_row + 1).saturating_sub(rows);
-                for row in screen.drain(..from_top) {
-                    if is_primary {
-                        self.departed.push(row);
+                    if is_primary && row.line.is_some() {
+                        // Its log line keeps the full text; a rewrap after this is a new line.
+                        row.sealed = true;
+                    } else {
+                        row.dirty = true;
                     }
                 }
-                screen.truncate(rows);
-                if is_active {
-                    self.cursor.row -= from_top;
+            }
+            if rows < screen.len() {
+                // Keep the cursor's row and the text above it: rows go from the top first, and
+                // on the primary screen they leave for the log rather than vanish.
+                let last_used = screen
+                    .iter()
+                    .rposition(|row| !row.is_blank() || row.line.is_some())
+                    .unwrap_or(0);
+                let anchor = if is_primary {
+                    primary_cursor.max(last_used)
+                } else {
+                    alt_cursor
+                };
+                let from_top = (anchor + 1).saturating_sub(rows);
+                let gone: Vec<Row> = screen.drain(..from_top).collect();
+                let below: Vec<Row> = screen.drain(rows.min(screen.len())..).collect();
+                if is_primary {
+                    primary_from_top = from_top;
+                    self.departed.extend(gone);
+                    self.departed.extend(
+                        below
+                            .into_iter()
+                            .filter(|r| !r.is_blank() || r.line.is_some()),
+                    );
+                }
+                if is_primary != self.alt_active {
+                    self.cursor.row = self.cursor.row.saturating_sub(from_top);
                 }
             }
             while screen.len() < rows {
@@ -324,6 +348,17 @@ impl Term {
         self.cursor.row = self.cursor.row.min(rows - 1);
         self.cursor.col = self.cursor.col.min(cols - 1);
         self.cursor.pending_wrap = false;
+        if let Some(saved) = self.saved_primary.as_mut() {
+            saved.row = saved.row.saturating_sub(primary_from_top);
+        }
+        for saved in [&mut self.saved_primary, &mut self.saved_alt]
+            .into_iter()
+            .flatten()
+        {
+            saved.row = saved.row.min(rows - 1);
+            saved.col = saved.col.min(cols - 1);
+            saved.pending_wrap = false;
+        }
         self.tabs = tab_stops(cols);
         self.revision += 1;
     }
@@ -461,6 +496,9 @@ impl Term {
     // Writing and erasing.
 
     fn put(&mut self, c: char) {
+        // Whatever moved the cursor, it writes inside the row.
+        self.cursor.row = self.cursor.row.min(self.rows - 1);
+        self.cursor.col = self.cursor.col.min(self.cols - 1);
         let c = if self.cursor.graphics[self.cursor.charset] {
             dec_graphics(c)
         } else {
@@ -623,6 +661,7 @@ impl Term {
             }
         }
         self.cursor.row = self.cursor.row.min(self.rows - 1);
+        self.cursor.col = self.cursor.col.min(self.cols - 1);
         self.cursor.pending_wrap = false;
     }
 
@@ -793,7 +832,7 @@ impl Perform for Term {
             (None, '@') => {
                 let (row, col, style) = (self.cursor.row, self.cursor.col, self.cursor.style);
                 let r = self.row_mut(row);
-                for _ in 0..n(0).min(r.cells.len() - col) {
+                for _ in 0..n(0).min(r.cells.len().saturating_sub(col)) {
                     r.cells.insert(col, Cell::blank(style.erased()));
                     r.cells.pop();
                 }
@@ -827,7 +866,7 @@ impl Perform for Term {
             (None, 'P') => {
                 let (row, col, style) = (self.cursor.row, self.cursor.col, self.cursor.style);
                 let r = self.row_mut(row);
-                for _ in 0..n(0).min(r.cells.len() - col) {
+                for _ in 0..n(0).min(r.cells.len().saturating_sub(col)) {
                     r.cells.remove(col);
                     r.cells.push(Cell::blank(style.erased()));
                 }
@@ -1149,6 +1188,16 @@ mod tests {
                 .any(|s| s.0 <= ok && ok < s.1 && s.2.fg == TermColor::Indexed(2)),
             "{spans:?}"
         );
+    }
+
+    #[test]
+    fn leaving_full_screen_after_narrowing_keeps_the_cursor_in_the_row() {
+        let mut term = Term::new(100, 10);
+        feed(&mut term, "\x1b[1;80Hprompt\x1b[?1049h");
+        term.resize(30, 10);
+        // Used to index past the row and panic.
+        feed(&mut term, "\x1b[?1049lx\x1b[2@\x1b[2P");
+        assert!(term.cursor().1 < 30);
     }
 
     #[test]
