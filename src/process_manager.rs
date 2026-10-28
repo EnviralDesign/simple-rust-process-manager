@@ -16,8 +16,9 @@ use chrono::{Datelike, Timelike};
 use serde::Serialize;
 use tokio::sync::watch;
 
-use crate::config::{ProcessConfig, ProcessType};
+use crate::config::{ProcessConfig, ProcessType, TerminalMode};
 use crate::log_classification::contains_error_indicator;
+use crate::terminal::{LogSink, LogSpans, TerminalSession};
 
 const IN_MEMORY_LOG_LIMIT: usize = 1000;
 const ACTIVITY_LIMIT: usize = 200;
@@ -28,8 +29,11 @@ const STACK_LOG_LINES_PER_PROCESS: usize = 120;
 const PROCESS_LOG_FOLDER_NAME: &str = "Process Manager logs";
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const CPU_TIME_UNITS_PER_SECOND: f64 = 10_000_000.0;
+/// How long a stopped or exited terminal process waits for its last output to arrive.
+const TERMINAL_DRAIN: Duration = Duration::from_millis(1500);
 
 type SharedLogFile = Arc<Mutex<File>>;
+pub type SharedTerminal = Arc<Mutex<TerminalSession>>;
 
 /// Status of a managed process
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +62,75 @@ impl std::fmt::Display for ProcessStatus {
 pub struct LogLine {
     pub text: String,
     pub at: chrono::DateTime<chrono::Local>,
+    /// Colours and emphasis, for lines from a terminal.
+    pub spans: LogSpans,
+}
+
+/// A running process: spawned with pipes, or in a pseudo-terminal.
+pub enum ManagedChild {
+    Piped(Child),
+    Terminal {
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        pid: u32,
+    },
+}
+
+/// How a process ended, from either kind of child.
+struct ChildExit {
+    code: Option<i32>,
+    success: bool,
+    text: String,
+}
+
+impl ManagedChild {
+    pub fn id(&self) -> u32 {
+        match self {
+            ManagedChild::Piped(child) => child.id(),
+            ManagedChild::Terminal { pid, .. } => *pid,
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ChildExit>> {
+        Ok(match self {
+            ManagedChild::Piped(child) => child.try_wait()?.map(|status| ChildExit {
+                code: status.code(),
+                success: status.success(),
+                text: status.to_string(),
+            }),
+            ManagedChild::Terminal { child, .. } => child.try_wait()?.map(|status| ChildExit {
+                code: Some(status.exit_code() as i32),
+                success: status.success(),
+                text: format!("exit code: {}", status.exit_code()),
+            }),
+        })
+    }
+
+    fn wait(&mut self) {
+        match self {
+            ManagedChild::Piped(child) => {
+                let _ = child.wait();
+            }
+            ManagedChild::Terminal { child, .. } => {
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            ManagedChild::Piped(child) => child.kill(),
+            ManagedChild::Terminal { child, .. } => child.kill(),
+        }
+    }
+
+    /// Stops the process and everything it started (Unix: its process group).
+    #[cfg(unix)]
+    fn stop_group(&mut self) -> std::io::Result<()> {
+        let pid = self.id();
+        crate::platform::stop_process_group(pid, || {
+            let _ = self.try_wait();
+        })
+    }
 }
 
 /// What kind of thing happened to a process, for the Activity view.
@@ -100,6 +173,10 @@ pub struct ProcessRuntimeInfo {
     /// Lines ever added to the in-memory log this session, so line numbers stay stable as old
     /// lines fall off the front.
     pub log_total: u64,
+    /// The process has a terminal (running, or its last screen kept after it ended).
+    pub has_terminal: bool,
+    /// A full-screen program has its terminal's alternate screen.
+    pub alt_screen: bool,
 }
 
 /// Runtime state for a single process
@@ -108,7 +185,11 @@ pub struct ProcessState {
     pub status: ProcessStatus,
     pub logs: Vec<LogLine>,
     pub disk_log: Option<SharedLogFile>,
-    pub child: Option<Child>,
+    pub child: Option<ManagedChild>,
+    /// The terminal of a process run in one; kept after it ends so its last screen stays.
+    pub terminal: Option<SharedTerminal>,
+    /// Mirrors the terminal's alternate-screen flag, so snapshots need not lock the terminal.
+    terminal_alt: bool,
     pub resource_usage: ProcessResourceUsage,
     pub suppress_restart_once: bool,
     resource_sample: Option<ResourceSample>,
@@ -134,6 +215,8 @@ impl ProcessState {
             logs: Vec::new(),
             disk_log: None,
             child: None,
+            terminal: None,
+            terminal_alt: false,
             resource_usage: ProcessResourceUsage::default(),
             suppress_restart_once: false,
             resource_sample: None,
@@ -214,6 +297,8 @@ impl ProcessState {
             last_exit: self.last_exit,
             restart_pending: self.restart_pending,
             log_total: self.log_total,
+            has_terminal: self.terminal.is_some(),
+            alt_screen: self.terminal_alt,
         }
     }
 }
@@ -606,404 +691,162 @@ impl ProcessManager {
             println!("[DEBUG] Thread spawned for command: {}", command);
             println!("[DEBUG] Working dir: '{}'", working_dir);
 
+            let fail = |error: &str| {
+                fail_start(
+                    &processes_arc,
+                    &id_owned,
+                    error,
+                    &error_version,
+                    &process_error_versions,
+                    &event_tx,
+                    &event_version,
+                )
+            };
+
             let (program, args) = match parse_command(&command) {
                 Ok((program, args)) => (program, args),
-                Err(e) => {
-                    let mut processes = processes_arc.lock().unwrap();
-                    if let Some(state) = processes.get_mut(&id_owned) {
-                        state.status = ProcessStatus::Error(e.clone());
-                        let _ = clear_resource_usage(state);
-                        log_process_state_event(state, format!("[Failed to start: {}]", e));
-                        state.mark_failed(&e);
-                    }
-                    bump_error(&error_version, &process_error_versions, &id_owned);
-                    bump_event(&event_tx, &event_version);
-                    return;
-                }
+                Err(e) => return fail(&e),
             };
 
-            // Build command (direct spawn; on Windows, .cmd/.bat are routed through cmd)
-            let (mut cmd, program_label) = match build_command(&program, &args, &working_dir) {
-                Ok(result) => result,
-                Err(e) => {
-                    let mut processes = processes_arc.lock().unwrap();
-                    if let Some(state) = processes.get_mut(&id_owned) {
-                        state.status = ProcessStatus::Error(e.clone());
-                        let _ = clear_resource_usage(state);
-                        log_process_state_event(state, format!("[Failed to start: {}]", e));
-                        state.mark_failed(&e);
-                    }
-                    bump_error(&error_version, &process_error_versions, &id_owned);
-                    bump_event(&event_tx, &event_version);
-                    return;
-                }
+            let spawned = if config_clone.terminal_mode == TerminalMode::Off {
+                spawn_piped(&program, &args, &working_dir)
+            } else {
+                spawn_terminal(&program, &args, &working_dir)
+            };
+            let (mut child, output, program_label) = match spawned {
+                Ok(spawned) => spawned,
+                Err(e) => return fail(&e),
             };
 
-            if !working_dir.is_empty() {
-                println!("[DEBUG] Setting current_dir to: {}", working_dir);
-                cmd.current_dir(&working_dir);
-            }
-
-            // Explicitly inherit the parent process's environment variables.
-            // This is critical on Windows when using CREATE_NO_WINDOW, as the
-            // spawned process may otherwise receive an incomplete PATH that
-            // doesn't include user-specific directories (e.g., where npm lives).
-            cmd.envs(std::env::vars());
-
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            // Hide console window on Windows
             #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-            }
-
-            println!("[DEBUG] About to spawn command...");
-            match cmd.spawn() {
-                Ok(mut child) => {
-                    #[cfg(windows)]
-                    let mut job = match create_job() {
-                        Ok(job) => {
-                            if let Err(e) = assign_job(&job, &child) {
-                                eprintln!("[WARN] Failed to assign job: {}", e);
-                                None
-                            } else {
-                                Some(job)
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[WARN] Failed to create job: {}", e);
-                            None
-                        }
-                    };
-
-                    println!(
-                        "[DEBUG] Command spawned successfully! PID: {:?}, Program: '{}'",
-                        child.id(),
-                        program_label
-                    );
-                    // Capture stdout
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-                    let disk_log = if config_clone.log_to_disk {
-                        let base_directory = log_directory.lock().unwrap().clone();
-                        match create_disk_log_session(&base_directory, &config_clone) {
-                            Ok(file) => Some(file),
-                            Err(err) => {
-                                eprintln!(
-                                    "[WARN] Failed to initialize disk logging for '{}': {}",
-                                    config_clone.name, err
-                                );
-                                None
-                            }
-                        }
-                    } else {
+            let mut job = match create_job() {
+                Ok(job) => {
+                    if let Err(e) = assign_job(&job, &child) {
+                        eprintln!("[WARN] Failed to assign job: {}", e);
                         None
-                    };
-
-                    {
-                        let mut processes = processes_arc.lock().unwrap();
-                        if !processes.get(&id_owned).is_some_and(|state| {
-                            start_request_is_current_state(state, start_generation)
-                        }) {
-                            // Stop/shutdown may have arrived between validation and spawn.
-                            // Do not publish an already-cancelled child into the managed set.
-                            #[cfg(unix)]
-                            let _ = crate::platform::stop_process_group(&mut child);
-                            #[cfg(not(unix))]
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return;
-                        }
-                        if let Some(state) = processes.get_mut(&id_owned) {
-                            state.mark_running(Some(child.id()));
-                            state.disk_log = disk_log.clone();
-                            log_process_state_event(
-                                state,
-                                format!("[Started with PID {}]", child.id()),
-                            );
-                            if config_clone.log_to_disk && state.disk_log.is_none() {
-                                push_in_memory_log(
-                                    state,
-                                    "[Disk logging unavailable. See stderr for details.]"
-                                        .to_string(),
-                                );
-                            }
-                            println!("[DEBUG] Status set to Running");
-                            state.child = Some(child);
-                            #[cfg(windows)]
-                            {
-                                state.job = job.take();
-                            }
-                        }
+                    } else {
+                        Some(job)
                     }
-                    bump_event(&event_tx, &event_version);
-
-                    // Stream stdout in background
-                    if let Some(stdout) = stdout {
-                        let processes_clone = processes_arc.clone();
-                        let id_clone = id_owned.clone();
-                        let event_tx = event_tx.clone();
-                        let event_version = event_version.clone();
-                        let error_version = error_version.clone();
-                        let process_error_versions = process_error_versions.clone();
-                        thread::spawn(move || {
-                            let mut reader = BufReader::new(stdout);
-                            let mut buffer = Vec::new();
-                            loop {
-                                buffer.clear();
-                                let read = match reader.read_until(b'\n', &mut buffer) {
-                                    Ok(read) => read,
-                                    Err(err) => {
-                                        let (updated, has_error) = append_runtime_log(
-                                            &processes_clone,
-                                            &id_clone,
-                                            format!("[stdout reader error: {}]", err),
-                                            true,
-                                        );
-                                        if updated {
-                                            if has_error {
-                                                bump_error(
-                                                    &error_version,
-                                                    &process_error_versions,
-                                                    &id_clone,
-                                                );
-                                            }
-                                            bump_event(&event_tx, &event_version);
-                                        }
-                                        break;
-                                    }
-                                };
-                                if read == 0 {
-                                    break;
-                                }
-                                while matches!(buffer.last(), Some(b'\n' | b'\r')) {
-                                    buffer.pop();
-                                }
-                                let line = String::from_utf8_lossy(&buffer).into_owned();
-                                if line.is_empty() {
-                                    continue;
-                                }
-                                let (updated, has_error) =
-                                    append_runtime_log(&processes_clone, &id_clone, line, false);
-                                if updated {
-                                    if has_error {
-                                        bump_error(
-                                            &error_version,
-                                            &process_error_versions,
-                                            &id_clone,
-                                        );
-                                    }
-                                    bump_event(&event_tx, &event_version);
-                                }
-                            }
-                        });
-                    }
-
-                    // Stream stderr in background
-                    if let Some(stderr) = stderr {
-                        let processes_clone = processes_arc.clone();
-                        let id_clone = id_owned.clone();
-                        let event_tx = event_tx.clone();
-                        let event_version = event_version.clone();
-                        let error_version = error_version.clone();
-                        let process_error_versions = process_error_versions.clone();
-                        thread::spawn(move || {
-                            let mut reader = BufReader::new(stderr);
-                            let mut buffer = Vec::new();
-                            loop {
-                                buffer.clear();
-                                let read = match reader.read_until(b'\n', &mut buffer) {
-                                    Ok(read) => read,
-                                    Err(err) => {
-                                        let (updated, has_error) = append_runtime_log(
-                                            &processes_clone,
-                                            &id_clone,
-                                            format!("[stderr reader error: {}]", err),
-                                            true,
-                                        );
-                                        if updated {
-                                            if has_error {
-                                                bump_error(
-                                                    &error_version,
-                                                    &process_error_versions,
-                                                    &id_clone,
-                                                );
-                                            }
-                                            bump_event(&event_tx, &event_version);
-                                        }
-                                        break;
-                                    }
-                                };
-                                if read == 0 {
-                                    break;
-                                }
-                                while matches!(buffer.last(), Some(b'\n' | b'\r')) {
-                                    buffer.pop();
-                                }
-                                let line = String::from_utf8_lossy(&buffer).into_owned();
-                                if line.is_empty() {
-                                    continue;
-                                }
-                                let (updated, has_error) =
-                                    append_runtime_log(&processes_clone, &id_clone, line, true);
-                                if updated {
-                                    if has_error {
-                                        bump_error(
-                                            &error_version,
-                                            &process_error_versions,
-                                            &id_clone,
-                                        );
-                                    }
-                                    bump_event(&event_tx, &event_version);
-                                }
-                            }
-                        });
-                    }
-
-                    // Monitor process exit
-                    let processes_monitor = processes_arc.clone();
-                    let id_monitor = id_owned.clone();
-                    let event_tx = event_tx.clone();
-                    let event_version = event_version.clone();
-                    let error_version = error_version.clone();
-                    let process_error_versions = process_error_versions.clone();
-                    thread::spawn(move || {
-                        loop {
-                            thread::sleep(std::time::Duration::from_millis(500));
-                            let mut updated = false;
-                            let mut had_error = false;
-                            let mut should_schedule_restart = false;
-                            let mut should_break = false;
-                            {
-                                let mut processes = processes_monitor.lock().unwrap();
-                                if let Some(state) = processes.get_mut(&id_monitor) {
-                                    if state.start_generation != start_generation {
-                                        break;
-                                    }
-                                    if let Some(ref mut child) = state.child {
-                                        #[cfg(unix)]
-                                        let process_group = child.id();
-                                        match child.try_wait() {
-                                            Ok(Some(status)) => {
-                                                #[cfg(unix)]
-                                                let _ = crate::platform::kill_process_group(
-                                                    process_group,
-                                                );
-                                                log_process_state_event(
-                                                    state,
-                                                    format!("[Process exited with: {}]", status),
-                                                );
-                                                let exit = ExitSummary {
-                                                    code: status.code(),
-                                                    success: status.success(),
-                                                };
-                                                state.last_exit = Some(exit);
-                                                state.running_since = None;
-                                                state.record(
-                                                    ActivityKind::Exited,
-                                                    exit_text(exit),
-                                                    "",
-                                                );
-                                                if state.config.auto_restart
-                                                    && managed_restart_active_now(&state.config)
-                                                    && !state.suppress_restart_once
-                                                {
-                                                    log_process_state_event(
-                                                        state,
-                                                        "[Managed process went down. Restarting...]"
-                                                            .to_string(),
-                                                    );
-                                                    state.restart_pending = true;
-                                                    should_schedule_restart = true;
-                                                }
-                                                state.status = ProcessStatus::Stopped;
-                                                state.suppress_restart_once = false;
-                                                state.child = None;
-                                                state.disk_log = None;
-                                                let _ = clear_resource_usage(state);
-                                                #[cfg(windows)]
-                                                {
-                                                    state.job = None;
-                                                }
-                                                updated = true;
-                                                should_break = true;
-                                            }
-                                            Ok(None) => {
-                                                // Still running
-                                            }
-                                            Err(e) => {
-                                                #[cfg(unix)]
-                                                let _ = crate::platform::kill_process_group(
-                                                    process_group,
-                                                );
-                                                state.status = ProcessStatus::Error(e.to_string());
-                                                state.running_since = None;
-                                                state.record(
-                                                    ActivityKind::Failed,
-                                                    format!("Lost track of the process: {e}"),
-                                                    "",
-                                                );
-                                                state.child = None;
-                                                state.disk_log = None;
-                                                let _ = clear_resource_usage(state);
-                                                #[cfg(windows)]
-                                                {
-                                                    state.job = None;
-                                                }
-                                                updated = true;
-                                                had_error = true;
-                                                should_break = true;
-                                            }
-                                        }
-                                    } else {
-                                        should_break = true;
-                                    }
-                                } else {
-                                    should_break = true;
-                                }
-                            }
-                            if updated {
-                                if had_error {
-                                    bump_error(
-                                        &error_version,
-                                        &process_error_versions,
-                                        &id_monitor,
-                                    );
-                                }
-                                bump_event(&event_tx, &event_version);
-                            }
-                            if should_schedule_restart {
-                                schedule_managed_restart(
-                                    id_monitor.clone(),
-                                    processes_monitor.clone(),
-                                    log_directory.clone(),
-                                    event_tx.clone(),
-                                    event_version.clone(),
-                                    error_version.clone(),
-                                    process_error_versions.clone(),
-                                );
-                            }
-                            if should_break {
-                                break;
-                            }
-                        }
-                    });
                 }
                 Err(e) => {
-                    let mut processes = processes_arc.lock().unwrap();
-                    if let Some(state) = processes.get_mut(&id_owned) {
-                        state.status = ProcessStatus::Error(e.to_string());
-                        let _ = clear_resource_usage(state);
-                        log_process_state_event(state, format!("[Failed to start: {}]", e));
-                        state.mark_failed(&e.to_string());
+                    eprintln!("[WARN] Failed to create job: {}", e);
+                    None
+                }
+            };
+
+            println!(
+                "[DEBUG] Command spawned successfully! PID: {:?}, Program: '{}'",
+                child.id(),
+                program_label
+            );
+            let disk_log = if config_clone.log_to_disk {
+                let base_directory = log_directory.lock().unwrap().clone();
+                match create_disk_log_session(&base_directory, &config_clone) {
+                    Ok(file) => Some(file),
+                    Err(err) => {
+                        eprintln!(
+                            "[WARN] Failed to initialize disk logging for '{}': {}",
+                            config_clone.name, err
+                        );
+                        None
                     }
-                    bump_error(&error_version, &process_error_versions, &id_owned);
-                    bump_event(&event_tx, &event_version);
+                }
+            } else {
+                None
+            };
+
+            {
+                let mut processes = processes_arc.lock().unwrap();
+                if !processes
+                    .get(&id_owned)
+                    .is_some_and(|state| start_request_is_current_state(state, start_generation))
+                {
+                    // Stop/shutdown may have arrived between validation and spawn.
+                    // Do not publish an already-cancelled child into the managed set.
+                    drop(processes);
+                    #[cfg(unix)]
+                    let _ = child.stop_group();
+                    #[cfg(not(unix))]
+                    let _ = child.kill();
+                    child.wait();
+                    output.discard();
+                    return;
+                }
+                if let Some(state) = processes.get_mut(&id_owned) {
+                    state.mark_running(Some(child.id()));
+                    state.disk_log = disk_log.clone();
+                    log_process_state_event(state, format!("[Started with PID {}]", child.id()));
+                    if config_clone.log_to_disk && state.disk_log.is_none() {
+                        push_in_memory_log(
+                            state,
+                            "[Disk logging unavailable. See stderr for details.]".to_string(),
+                        );
+                    }
+                    state.terminal = output.terminal();
+                    state.terminal_alt = false;
+                    println!("[DEBUG] Status set to Running");
+                    state.child = Some(child);
+                    #[cfg(windows)]
+                    {
+                        state.job = job.take();
+                    }
                 }
             }
+            bump_event(&event_tx, &event_version);
+
+            match output {
+                Output::Piped { stdout, stderr } => {
+                    for (reader, is_stderr) in [
+                        (
+                            stdout.map(|r| Box::new(r) as Box<dyn std::io::Read + Send>),
+                            false,
+                        ),
+                        (
+                            stderr.map(|r| Box::new(r) as Box<dyn std::io::Read + Send>),
+                            true,
+                        ),
+                    ] {
+                        if let Some(reader) = reader {
+                            pump_pipe(
+                                reader,
+                                is_stderr,
+                                id_owned.clone(),
+                                processes_arc.clone(),
+                                event_tx.clone(),
+                                event_version.clone(),
+                                error_version.clone(),
+                                process_error_versions.clone(),
+                            );
+                        }
+                    }
+                }
+                Output::Terminal {
+                    reader,
+                    terminal,
+                    done,
+                } => pump_terminal(
+                    id_owned.clone(),
+                    terminal,
+                    reader,
+                    done,
+                    processes_arc.clone(),
+                    event_tx.clone(),
+                    event_version.clone(),
+                    error_version.clone(),
+                    process_error_versions.clone(),
+                ),
+            }
+
+            monitor_child(
+                id_owned,
+                start_generation,
+                processes_arc,
+                log_directory,
+                event_tx,
+                event_version,
+                error_version,
+                process_error_versions,
+            );
         });
     }
 
@@ -1465,13 +1308,13 @@ impl ProcessManager {
                     }
                     #[cfg(unix)]
                     {
-                        let _ = crate::platform::stop_process_group(child);
+                        let _ = child.stop_group();
                     }
                     #[cfg(not(any(windows, unix)))]
                     {
                         let _ = child.kill();
                     }
-                    let _ = child.wait();
+                    child.wait();
                     state.child = None;
                 }
                 #[cfg(windows)]
@@ -1520,6 +1363,13 @@ impl ProcessManager {
         } else {
             false
         }
+    }
+
+    /// The terminal of a process run in one (its last screen, once it has ended). Lock it only
+    /// after this returns: the manager's lock is never held while waiting for a terminal's.
+    pub fn terminal(&self, id: &str) -> Option<SharedTerminal> {
+        let processes = self.processes.lock().unwrap();
+        processes.get(id).and_then(|state| state.terminal.clone())
     }
 
     pub fn get_recent_logs(&self, id: &str, limit: usize) -> Option<Vec<String>> {
@@ -2047,9 +1897,14 @@ fn log_process_state_event(state: &mut ProcessState, message: String) {
 }
 
 fn push_in_memory_log(state: &mut ProcessState, line: String) {
+    push_log_line(state, line, None);
+}
+
+fn push_log_line(state: &mut ProcessState, line: String, spans: LogSpans) {
     state.logs.push(LogLine {
         text: line,
         at: chrono::Local::now(),
+        spans,
     });
     state.log_total += 1;
     if state.logs.len() > IN_MEMORY_LOG_LIMIT {
@@ -2370,7 +2225,8 @@ fn stop_process_inner(
 ) {
     let id_owned = id.to_string();
 
-    let mut child_to_kill: Option<Child> = None;
+    let mut child_to_kill: Option<ManagedChild> = None;
+    let mut terminal_to_finish: Option<SharedTerminal> = None;
     #[cfg(windows)]
     let mut job_to_close: Option<JobHandle> = None;
     let mut docker_container: Option<String> = None;
@@ -2391,6 +2247,7 @@ fn stop_process_inner(
                     if let Some(child) = state.child.take() {
                         state.status = ProcessStatus::Stopping;
                         child_to_kill = Some(child);
+                        terminal_to_finish = state.terminal.clone();
                         #[cfg(windows)]
                         {
                             job_to_close = state.job.take();
@@ -2446,7 +2303,7 @@ fn stop_process_inner(
             }
             #[cfg(unix)]
             {
-                if let Err(e) = crate::platform::stop_process_group(&mut child) {
+                if let Err(e) = child.stop_group() {
                     stop_error = Some(e.to_string());
                     let _ = child.kill();
                 }
@@ -2458,7 +2315,10 @@ fn stop_process_inner(
                 }
             }
 
-            let _ = child.wait();
+            child.wait();
+            if let Some(terminal) = &terminal_to_finish {
+                finish_terminal(terminal, &processes_arc, &id_owned);
+            }
 
             let mut processes = processes_arc.lock().unwrap();
             if let Some(state) = processes.get_mut(&id_owned) {
@@ -2784,11 +2644,16 @@ fn create_job() -> Result<JobHandle, String> {
 }
 
 #[cfg(windows)]
-fn assign_job(job: &JobHandle, child: &Child) -> Result<(), String> {
+fn assign_job(job: &JobHandle, child: &ManagedChild) -> Result<(), String> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 
-    let handle = child.as_raw_handle();
+    let handle = match child {
+        ManagedChild::Piped(child) => child.as_raw_handle(),
+        ManagedChild::Terminal { child, .. } => child
+            .as_raw_handle()
+            .ok_or_else(|| "The terminal did not give a process handle".to_string())?,
+    };
     let result = unsafe { AssignProcessToJobObject(job.handle, handle) };
     if result == 0 {
         Err(std::io::Error::last_os_error().to_string())
@@ -2811,6 +2676,512 @@ fn build_command(
         cmd.process_group(0);
     }
     Ok((cmd, program.to_string()))
+}
+
+/// The program and arguments to run, as `build_command` resolves them, and a label for the log.
+#[cfg(not(windows))]
+fn command_parts(
+    program: &str,
+    args: &[String],
+    _working_directory: &str,
+) -> Result<(String, Vec<String>, String), String> {
+    Ok((program.to_string(), args.to_vec(), program.to_string()))
+}
+
+#[cfg(windows)]
+fn command_parts(
+    program: &str,
+    args: &[String],
+    working_directory: &str,
+) -> Result<(String, Vec<String>, String), String> {
+    let resolved = resolve_program(program, working_directory)?;
+    if resolved.is_cmd_script {
+        let mut all = vec!["/C".to_string(), resolved.path.clone()];
+        all.extend(args.iter().cloned());
+        Ok(("cmd".to_string(), all, format!("cmd /C {}", resolved.path)))
+    } else {
+        Ok((resolved.path.clone(), args.to_vec(), resolved.path))
+    }
+}
+
+/// The size new terminals start at, in cells: the console's log area, as the UI last measured it.
+static TERMINAL_SIZE: Mutex<(usize, usize)> = Mutex::new((120, 32));
+
+/// Called by the UI with the size of its log area, so programs format for what is visible.
+pub fn set_terminal_size(cols: usize, rows: usize) {
+    *TERMINAL_SIZE.lock().unwrap() = (cols.clamp(40, 500), rows.clamp(10, 300));
+}
+
+/// Spawns a command in a pseudo-terminal. Returns the child, the terminal's master end, and the
+/// reader and writer for its output and input.
+fn spawn_in_terminal(
+    program: &str,
+    args: &[String],
+    working_directory: &str,
+    (cols, rows): (usize, usize),
+) -> Result<
+    (
+        ManagedChild,
+        Box<dyn portable_pty::MasterPty + Send>,
+        Box<dyn std::io::Read + Send>,
+        Box<dyn Write + Send>,
+    ),
+    String,
+> {
+    let pair = portable_pty::native_pty_system()
+        .openpty(portable_pty::PtySize {
+            rows: rows as u16,
+            cols: cols as u16,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Could not open a terminal: {e}"))?;
+    let mut cmd = portable_pty::CommandBuilder::new(program);
+    cmd.args(args);
+    // The same environment a piped process gets (portable-pty would otherwise mix in the
+    // registry's), plus what tells programs they have a capable terminal.
+    cmd.env_clear();
+    for (key, value) in std::env::vars_os() {
+        cmd.env(key, value);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    let cwd = if working_directory.is_empty() {
+        std::env::current_dir().map_err(|e| e.to_string())?
+    } else {
+        PathBuf::from(working_directory)
+    };
+    cmd.cwd(cwd);
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(pair.slave);
+    let pid = child.process_id().unwrap_or(0);
+    let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    Ok((
+        ManagedChild::Terminal { child, pid },
+        pair.master,
+        reader,
+        writer,
+    ))
+}
+
+/// A terminal's lines going into a process's logs.
+struct StateSink<'a> {
+    state: &'a mut ProcessState,
+    error: bool,
+}
+
+impl LogSink for StateSink<'_> {
+    fn push(&mut self, text: String, spans: LogSpans) -> u64 {
+        push_log_line(self.state, text, spans);
+        self.state.log_total
+    }
+
+    fn amend(&mut self, number: u64, text: String, spans: LogSpans) {
+        let back = self.state.log_total.saturating_sub(number) as usize;
+        let len = self.state.logs.len();
+        if back < len {
+            let line = &mut self.state.logs[len - 1 - back];
+            line.text = text;
+            line.spans = spans;
+        }
+    }
+
+    fn settle(&mut self, text: &str) {
+        if let Some(file) = &self.state.disk_log {
+            write_disk_log_line(file, text);
+        }
+        self.error |= line_has_error(text);
+    }
+}
+
+/// Brings a process's log up to date with its terminal; `Some(had_error)` when it did. The
+/// caller holds the terminal's lock, so the lock order is always terminal, then processes.
+fn sync_terminal(
+    session: &mut TerminalSession,
+    terminal: &SharedTerminal,
+    processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
+    id: &str,
+    finish: bool,
+) -> Option<bool> {
+    let mut processes = processes.lock().unwrap();
+    let state = processes.get_mut(id)?;
+    // A newer start has its own terminal; this one no longer writes to the log.
+    if !state
+        .terminal
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, terminal))
+    {
+        return None;
+    }
+    let mut sink = StateSink {
+        state,
+        error: false,
+    };
+    session.sync(&mut sink, Instant::now(), finish);
+    let StateSink { state, error } = sink;
+    state.terminal_alt = session.alt_active() && !finish;
+    Some(error)
+}
+
+/// Ends a process's terminal: closes it, waits for its last output, and makes every row final.
+fn finish_terminal(
+    terminal: &SharedTerminal,
+    processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
+    id: &str,
+) -> bool {
+    let detached = terminal.lock().unwrap().detach();
+    detached.close(TERMINAL_DRAIN);
+    let mut session = terminal.lock().unwrap();
+    sync_terminal(&mut session, terminal, processes, id, true).unwrap_or(false)
+}
+
+/// Reads a terminal's output into its emulator and the process's log until the terminal closes.
+#[allow(clippy::too_many_arguments)]
+fn pump_terminal(
+    id: String,
+    terminal: SharedTerminal,
+    mut reader: Box<dyn std::io::Read + Send>,
+    done: std::sync::mpsc::Sender<()>,
+    processes: Arc<Mutex<HashMap<String, ProcessState>>>,
+    event_tx: watch::Sender<u64>,
+    event_version: Arc<AtomicU64>,
+    error_version: Arc<AtomicU64>,
+    process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
+) {
+    thread::spawn(move || {
+        let mut buffer = vec![0u8; 16 * 1024];
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            let synced = {
+                let mut session = terminal.lock().unwrap();
+                session.feed(&buffer[..read]);
+                sync_terminal(&mut session, &terminal, &processes, &id, false)
+            };
+            if let Some(had_error) = synced {
+                if had_error {
+                    bump_error(&error_version, &process_error_versions, &id);
+                }
+                bump_event(&event_tx, &event_version);
+            }
+        }
+        let _ = done.send(());
+    });
+}
+
+/// Where a started process's output comes from.
+enum Output {
+    Piped {
+        stdout: Option<std::process::ChildStdout>,
+        stderr: Option<std::process::ChildStderr>,
+    },
+    Terminal {
+        reader: Box<dyn std::io::Read + Send>,
+        terminal: SharedTerminal,
+        done: std::sync::mpsc::Sender<()>,
+    },
+}
+
+impl Output {
+    fn terminal(&self) -> Option<SharedTerminal> {
+        match self {
+            Output::Piped { .. } => None,
+            Output::Terminal { terminal, .. } => Some(terminal.clone()),
+        }
+    }
+
+    /// Lets go of a start that was cancelled before it was published.
+    fn discard(self) {
+        if let Output::Terminal {
+            reader, terminal, ..
+        } = self
+        {
+            // Close our end of the output first, so closing the terminal cannot wait on it.
+            drop(reader);
+            let detached = terminal.lock().unwrap().detach();
+            detached.close(Duration::ZERO);
+        }
+    }
+}
+
+fn spawn_piped(
+    program: &str,
+    args: &[String],
+    working_dir: &str,
+) -> Result<(ManagedChild, Output, String), String> {
+    // Build command (direct spawn; on Windows, .cmd/.bat are routed through cmd)
+    let (mut cmd, program_label) = build_command(program, args, working_dir)?;
+
+    if !working_dir.is_empty() {
+        println!("[DEBUG] Setting current_dir to: {}", working_dir);
+        cmd.current_dir(working_dir);
+    }
+
+    // Explicitly inherit the parent process's environment variables.
+    // This is critical on Windows when using CREATE_NO_WINDOW, as the
+    // spawned process may otherwise receive an incomplete PATH that
+    // doesn't include user-specific directories (e.g., where npm lives).
+    cmd.envs(std::env::vars());
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // Hide console window on Windows
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    println!("[DEBUG] About to spawn command...");
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let output = Output::Piped {
+        stdout: child.stdout.take(),
+        stderr: child.stderr.take(),
+    };
+    Ok((ManagedChild::Piped(child), output, program_label))
+}
+
+fn spawn_terminal(
+    program: &str,
+    args: &[String],
+    working_dir: &str,
+) -> Result<(ManagedChild, Output, String), String> {
+    let (program, args, program_label) = command_parts(program, args, working_dir)?;
+    let size = *TERMINAL_SIZE.lock().unwrap();
+    let (child, master, reader, writer) = spawn_in_terminal(&program, &args, working_dir, size)?;
+    let (done, reader_done) = std::sync::mpsc::channel();
+    let input = crate::terminal::spawn_input_writer(writer);
+    let terminal = Arc::new(Mutex::new(TerminalSession::new(
+        size.0,
+        size.1,
+        master,
+        input,
+        reader_done,
+    )));
+    let output = Output::Terminal {
+        reader,
+        terminal,
+        done,
+    };
+    Ok((child, output, program_label))
+}
+
+fn fail_start(
+    processes: &Arc<Mutex<HashMap<String, ProcessState>>>,
+    id: &str,
+    error: &str,
+    error_version: &Arc<AtomicU64>,
+    process_error_versions: &Arc<Mutex<HashMap<String, u64>>>,
+    event_tx: &watch::Sender<u64>,
+    event_version: &Arc<AtomicU64>,
+) {
+    {
+        let mut processes = processes.lock().unwrap();
+        if let Some(state) = processes.get_mut(id) {
+            state.status = ProcessStatus::Error(error.to_string());
+            let _ = clear_resource_usage(state);
+            log_process_state_event(state, format!("[Failed to start: {}]", error));
+            state.mark_failed(error);
+        }
+    }
+    bump_error(error_version, process_error_versions, id);
+    bump_event(event_tx, event_version);
+}
+
+/// Reads one of a piped process's streams into its log, a line at a time.
+#[allow(clippy::too_many_arguments)]
+fn pump_pipe(
+    reader: Box<dyn std::io::Read + Send>,
+    is_stderr: bool,
+    id: String,
+    processes: Arc<Mutex<HashMap<String, ProcessState>>>,
+    event_tx: watch::Sender<u64>,
+    event_version: Arc<AtomicU64>,
+    error_version: Arc<AtomicU64>,
+    process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
+) {
+    let stream = if is_stderr { "stderr" } else { "stdout" };
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            let read = match reader.read_until(b'\n', &mut buffer) {
+                Ok(read) => read,
+                Err(err) => {
+                    let (updated, has_error) = append_runtime_log(
+                        &processes,
+                        &id,
+                        format!("[{stream} reader error: {}]", err),
+                        true,
+                    );
+                    if updated {
+                        if has_error {
+                            bump_error(&error_version, &process_error_versions, &id);
+                        }
+                        bump_event(&event_tx, &event_version);
+                    }
+                    break;
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                buffer.pop();
+            }
+            let line = String::from_utf8_lossy(&buffer).into_owned();
+            if line.is_empty() {
+                continue;
+            }
+            let (updated, has_error) = append_runtime_log(&processes, &id, line, is_stderr);
+            if updated {
+                if has_error {
+                    bump_error(&error_version, &process_error_versions, &id);
+                }
+                bump_event(&event_tx, &event_version);
+            }
+        }
+    });
+}
+
+/// Watches a started process until it exits: records the exit, schedules a managed restart, and
+/// keeps a terminal's rows settling while the program is quiet.
+#[allow(clippy::too_many_arguments)]
+fn monitor_child(
+    id: String,
+    start_generation: u64,
+    processes: Arc<Mutex<HashMap<String, ProcessState>>>,
+    log_directory: Arc<Mutex<String>>,
+    event_tx: watch::Sender<u64>,
+    event_version: Arc<AtomicU64>,
+    error_version: Arc<AtomicU64>,
+    process_error_versions: Arc<Mutex<HashMap<String, u64>>>,
+) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(500));
+        let terminal = {
+            let processes = processes.lock().unwrap();
+            match processes.get(&id) {
+                Some(state) if state.start_generation == start_generation => state.terminal.clone(),
+                _ => break,
+            }
+        };
+        if let Some(terminal) = &terminal {
+            let mut session = terminal.lock().unwrap();
+            if session.is_live()
+                && sync_terminal(&mut session, terminal, &processes, &id, false) == Some(true)
+            {
+                bump_error(&error_version, &process_error_versions, &id);
+            }
+        }
+
+        let ended = {
+            let mut processes = processes.lock().unwrap();
+            let Some(state) = processes.get_mut(&id) else {
+                break;
+            };
+            if state.start_generation != start_generation {
+                break;
+            }
+            let Some(child) = state.child.as_mut() else {
+                break;
+            };
+            #[cfg(unix)]
+            let process_group = child.id();
+            match child.try_wait() {
+                Ok(None) => continue,
+                ended => {
+                    #[cfg(unix)]
+                    let _ = crate::platform::kill_process_group(process_group);
+                    ended
+                }
+            }
+        };
+
+        // A terminal hands over its last output before the exit is recorded.
+        let mut had_error = match &terminal {
+            Some(terminal) => finish_terminal(terminal, &processes, &id),
+            None => false,
+        };
+        let mut should_schedule_restart = false;
+        {
+            let mut processes = processes.lock().unwrap();
+            let Some(state) = processes.get_mut(&id) else {
+                break;
+            };
+            // Stopped meanwhile: the stop records it.
+            if state.start_generation != start_generation {
+                break;
+            }
+            match ended {
+                Ok(Some(status)) => {
+                    log_process_state_event(
+                        state,
+                        format!("[Process exited with: {}]", status.text),
+                    );
+                    let exit = ExitSummary {
+                        code: status.code,
+                        success: status.success,
+                    };
+                    state.last_exit = Some(exit);
+                    state.running_since = None;
+                    state.record(ActivityKind::Exited, exit_text(exit), "");
+                    if state.config.auto_restart
+                        && managed_restart_active_now(&state.config)
+                        && !state.suppress_restart_once
+                    {
+                        log_process_state_event(
+                            state,
+                            "[Managed process went down. Restarting...]".to_string(),
+                        );
+                        state.restart_pending = true;
+                        should_schedule_restart = true;
+                    }
+                    state.status = ProcessStatus::Stopped;
+                    state.suppress_restart_once = false;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    state.status = ProcessStatus::Error(e.to_string());
+                    state.running_since = None;
+                    state.record(
+                        ActivityKind::Failed,
+                        format!("Lost track of the process: {e}"),
+                        "",
+                    );
+                    had_error = true;
+                }
+            }
+            state.child = None;
+            state.disk_log = None;
+            let _ = clear_resource_usage(state);
+            #[cfg(windows)]
+            {
+                state.job = None;
+            }
+        }
+        if had_error {
+            bump_error(&error_version, &process_error_versions, &id);
+        }
+        bump_event(&event_tx, &event_version);
+        if should_schedule_restart {
+            schedule_managed_restart(
+                id.clone(),
+                processes.clone(),
+                log_directory.clone(),
+                event_tx.clone(),
+                event_version.clone(),
+                error_version.clone(),
+                process_error_versions.clone(),
+            );
+        }
+        break;
+    });
 }
 
 #[cfg(windows)]
@@ -3397,6 +3768,56 @@ mod tests {
         assert!(super::parse_command("echo hello && echo world").is_err());
         assert!(super::parse_command("echo hello; echo world").is_err());
         assert!(super::parse_command("echo 'unclosed").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_processes_log_their_screen_and_keep_colour() {
+        let script =
+            std::env::temp_dir().join(format!("procman-term-{}.cmd", uuid::Uuid::new_v4()));
+        // A coloured line, a "progress bar" redrawn with carriage returns, and a final line.
+        std::fs::write(
+            &script,
+            "@echo off\r\necho \x1b[31mred line\x1b[0m\r\n<nul set /p=step 1\r\n\
+             <nul set /p=\r\r\n<nul set /p=step 2 of 2\r\necho.\r\necho done\r\nexit /B 3\r\n",
+        )
+        .unwrap();
+        let manager = ProcessManager::new();
+        let mut config = ProcessConfig::new(
+            "terminal".to_string(),
+            format!("\"{}\"", script.display()),
+            String::new(),
+            ProcessType::Process,
+        );
+        config.terminal_mode = crate::config::TerminalMode::Auto;
+        let id = config.id.clone();
+        manager.add_process(config);
+        manager.start_process(&id);
+        let exited = wait_until(|| {
+            manager
+                .get_recent_logs(&id, 100)
+                .unwrap_or_default()
+                .iter()
+                .any(|line| line.starts_with("[Process exited"))
+        });
+        let logs = manager.get_recent_logs(&id, 100).unwrap_or_default();
+        let _ = std::fs::remove_file(&script);
+        assert!(exited, "never exited: {logs:?}");
+        assert!(logs.iter().any(|l| l == "red line"), "{logs:?}");
+        assert!(logs.iter().any(|l| l == "done"), "{logs:?}");
+        assert!(logs.contains(&"[Process exited with: exit code: 3]".to_string()));
+        let red = manager.processes.lock().unwrap()[&id]
+            .logs
+            .iter()
+            .find(|l| l.text == "red line")
+            .and_then(|l| l.spans.clone());
+        assert_eq!(
+            red.as_deref().map(|s| s[0].style.fg),
+            Some(crate::terminal::TermColor::Indexed(1))
+        );
+        assert!(manager
+            .terminal(&id)
+            .is_some_and(|t| !t.lock().unwrap().is_live()));
     }
 
     #[cfg(windows)]

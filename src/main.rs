@@ -7,6 +7,7 @@ mod process_manager;
 mod rest_api;
 #[cfg(windows)]
 mod single_instance;
+mod terminal;
 mod ui;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -139,6 +139,26 @@ struct ManagedRestartScheduleWire {
     active_hours: Option<Vec<usize>>,
 }
 
+/// How a process's output is read: through pipes, or from a terminal Process Manager emulates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TerminalMode {
+    /// Pipes, as before terminals existed: plain lines, no colour. The default, so configs
+    /// written before 2.1 run exactly as they did.
+    #[default]
+    Off,
+    /// A terminal; the log keeps colours and redraws, and a full-screen program switches the
+    /// console to its screen.
+    Auto,
+    /// A terminal whose screen is the console's first view, for interactive tools.
+    Screen,
+}
+
+impl TerminalMode {
+    pub fn is_off(&self) -> bool {
+        *self == Self::Off
+    }
+}
+
 /// Human-readable scheduled-run cadence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ScheduledRunMode {
@@ -282,6 +302,9 @@ pub struct ProcessConfig {
     /// How many session log files to keep for this process
     #[serde(default = "default_log_rotation_count")]
     pub log_rotation_count: usize,
+    /// Pipes or a terminal; absent means `Off`, how every process ran before 2.1.
+    #[serde(default, skip_serializing_if = "TerminalMode::is_off")]
+    pub terminal_mode: TerminalMode,
 }
 
 /// One-layer grouping metadata for processes in the sidebar and REST API.
@@ -333,6 +356,7 @@ impl ProcessConfig {
             respond_to_restart_all: true,
             log_to_disk: false,
             log_rotation_count: default_log_rotation_count(),
+            terminal_mode: TerminalMode::Off,
         }
     }
 

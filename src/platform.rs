@@ -143,14 +143,15 @@ pub fn kill_process_group(pid: u32) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-pub fn stop_process_group(child: &mut std::process::Child) -> std::io::Result<()> {
-    let pid = child.id();
+/// Stops the group led by `pid`: SIGTERM, a short grace, then SIGKILL. `reap` polls the root
+/// (its `try_wait`) so a zombie does not extend the grace period.
+pub fn stop_process_group(pid: u32, mut reap: impl FnMut()) -> std::io::Result<()> {
     signal_process_group(pid, libc::SIGTERM)?;
     // Allow applications a short grace period, then kill stubborn descendants even
     // if their parent already exited. Never signal the manager's own process group.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < deadline {
-        let _ = child.try_wait(); // Reap the root so a zombie does not extend the grace period.
+        reap();
         if unsafe { libc::kill(-(pid as i32), 0) } != 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::ESRCH) {
