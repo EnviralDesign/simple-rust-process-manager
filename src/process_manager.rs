@@ -1,6 +1,6 @@
 //! Process management logic for starting, stopping, and monitoring processes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,11 @@ use crate::config::{ProcessConfig, ProcessType};
 use crate::log_classification::contains_error_indicator;
 
 const IN_MEMORY_LOG_LIMIT: usize = 1000;
+const ACTIVITY_LIMIT: usize = 200;
+/// Resource samples kept per process for the sparklines: two minutes at the 2 s sample interval.
+pub const RESOURCE_HISTORY_LIMIT: usize = 60;
+/// Lines per process merged into the stack log.
+const STACK_LOG_LINES_PER_PROCESS: usize = 120;
 const PROCESS_LOG_FOLDER_NAME: &str = "Process Manager logs";
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const CPU_TIME_UNITS_PER_SECOND: f64 = 10_000_000.0;
@@ -48,17 +53,75 @@ impl std::fmt::Display for ProcessStatus {
     }
 }
 
+/// One line of a process's in-memory log and when it arrived.
+#[derive(Debug, Clone)]
+pub struct LogLine {
+    pub text: String,
+    pub at: chrono::DateTime<chrono::Local>,
+}
+
+/// What kind of thing happened to a process, for the Activity view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Started,
+    Stopped,
+    Exited,
+    Failed,
+    Settings,
+}
+
+/// One entry of a process's session history: what happened and what caused it.
+#[derive(Debug, Clone)]
+pub struct ActivityEvent {
+    pub at: chrono::DateTime<chrono::Local>,
+    pub kind: ActivityKind,
+    pub text: String,
+    pub cause: String,
+}
+
+/// How the last run of a process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitSummary {
+    /// The exit code, when the platform reports one (a Unix signal has none).
+    pub code: Option<i32>,
+    pub success: bool,
+}
+
+/// Runtime facts about a process beyond its status, for the UI.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessRuntimeInfo {
+    pub pid: Option<u32>,
+    pub running_since: Option<chrono::DateTime<chrono::Local>>,
+    /// Starts that reached Running this session.
+    pub start_count: u32,
+    pub last_exit: Option<ExitSummary>,
+    /// A managed restart is about to start the process again.
+    pub restart_pending: bool,
+    /// Lines ever added to the in-memory log this session, so line numbers stay stable as old
+    /// lines fall off the front.
+    pub log_total: u64,
+}
+
 /// Runtime state for a single process
 pub struct ProcessState {
     pub config: ProcessConfig,
     pub status: ProcessStatus,
-    pub logs: Vec<String>,
+    pub logs: Vec<LogLine>,
     pub disk_log: Option<SharedLogFile>,
     pub child: Option<Child>,
     pub resource_usage: ProcessResourceUsage,
     pub suppress_restart_once: bool,
     resource_sample: Option<ResourceSample>,
     start_generation: u64,
+    log_total: u64,
+    activity: VecDeque<ActivityEvent>,
+    resource_history: VecDeque<ProcessResourceUsage>,
+    start_cause: String,
+    stop_cause: String,
+    running_since: Option<chrono::DateTime<chrono::Local>>,
+    start_count: u32,
+    last_exit: Option<ExitSummary>,
+    restart_pending: bool,
     #[cfg(windows)]
     pub job: Option<JobHandle>,
 }
@@ -75,8 +138,82 @@ impl ProcessState {
             suppress_restart_once: false,
             resource_sample: None,
             start_generation: 0,
+            log_total: 0,
+            activity: VecDeque::new(),
+            resource_history: VecDeque::new(),
+            start_cause: String::new(),
+            stop_cause: String::new(),
+            running_since: None,
+            start_count: 0,
+            last_exit: None,
+            restart_pending: false,
             #[cfg(windows)]
             job: None,
+        }
+    }
+
+    fn record(&mut self, kind: ActivityKind, text: impl Into<String>, cause: impl Into<String>) {
+        self.activity.push_back(ActivityEvent {
+            at: chrono::Local::now(),
+            kind,
+            text: text.into(),
+            cause: cause.into(),
+        });
+        while self.activity.len() > ACTIVITY_LIMIT {
+            self.activity.pop_front();
+        }
+    }
+
+    /// Puts the process into Starting for a new start request. Earlier output stays in the log:
+    /// a crash's traceback must survive the managed restart that follows it.
+    fn begin_start(&mut self, cause: impl Into<String>) -> u64 {
+        self.suppress_restart_once = false;
+        self.status = ProcessStatus::Starting;
+        self.disk_log = None;
+        let _ = clear_resource_usage(self);
+        self.start_generation = self.start_generation.wrapping_add(1);
+        self.start_cause = cause.into();
+        self.restart_pending = false;
+        self.last_exit = None;
+        self.start_generation
+    }
+
+    fn mark_running(&mut self, pid: Option<u32>) {
+        self.status = ProcessStatus::Running;
+        self.running_since = Some(chrono::Local::now());
+        self.start_count = self.start_count.saturating_add(1);
+        let text = match pid {
+            Some(pid) => format!("Started · PID {pid}"),
+            None => "Container started".to_string(),
+        };
+        let cause = std::mem::take(&mut self.start_cause);
+        self.record(ActivityKind::Started, text, cause);
+    }
+
+    fn mark_failed(&mut self, error: &str) {
+        self.running_since = None;
+        let cause = std::mem::take(&mut self.start_cause);
+        self.record(
+            ActivityKind::Failed,
+            format!("Failed to start: {}", error.trim()),
+            cause,
+        );
+    }
+
+    fn mark_stopped(&mut self) {
+        self.running_since = None;
+        let cause = std::mem::take(&mut self.stop_cause);
+        self.record(ActivityKind::Stopped, "Stopped", cause);
+    }
+
+    fn runtime_info(&self) -> ProcessRuntimeInfo {
+        ProcessRuntimeInfo {
+            pid: self.child.as_ref().map(|child| child.id()),
+            running_since: self.running_since,
+            start_count: self.start_count,
+            last_exit: self.last_exit,
+            restart_pending: self.restart_pending,
+            log_total: self.log_total,
         }
     }
 }
@@ -135,8 +272,14 @@ pub struct UiRuntimeSnapshot {
     pub counts: ProcessCounts,
     pub statuses: HashMap<String, ProcessStatus>,
     pub resource_usage: HashMap<String, ProcessResourceUsage>,
-    pub selected_logs: Vec<String>,
-    pub selected_log_count: usize,
+    pub info: HashMap<String, ProcessRuntimeInfo>,
+    pub selected_logs: Vec<LogLine>,
+    /// Line number (1-based, stable for the session) of `selected_logs[0]`.
+    pub selected_first_line: u64,
+    pub selected_activity: Vec<ActivityEvent>,
+    pub selected_history: Vec<ProcessResourceUsage>,
+    /// The newest lines of every process, oldest first, when the stack log was asked for.
+    pub stack_logs: Vec<(String, LogLine)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -367,7 +510,7 @@ impl ProcessManager {
 
     /// Remove a process (stops it first if running)
     pub fn remove_process(&self, id: &str) {
-        self.stop_process(id);
+        self.stop_process_by(id, "Deleted");
         let mut processes = self.processes.lock().unwrap();
         processes.remove(id);
         self.process_error_versions.lock().unwrap().remove(id);
@@ -376,8 +519,13 @@ impl ProcessManager {
         self.notify();
     }
 
-    /// Start a process
+    /// Start a process at the user's request.
     pub fn start_process(&self, id: &str) {
+        self.start_process_by(id, "You");
+    }
+
+    /// Start a process, recording `cause` (who or what asked) in its activity.
+    pub fn start_process_by(&self, id: &str, cause: &str) {
         println!("[DEBUG] start_process called with id: {}", id);
         let processes_arc = self.processes.clone();
         let log_directory = self.log_directory.clone();
@@ -399,13 +547,7 @@ impl ProcessManager {
                     println!("[DEBUG] Already running or starting, returning");
                     return; // Already running
                 }
-                state.suppress_restart_once = false;
-                state.status = ProcessStatus::Starting;
-                state.logs.clear();
-                state.disk_log = None;
-                let _ = clear_resource_usage(state);
-                state.start_generation = state.start_generation.wrapping_add(1);
-                let start_generation = state.start_generation;
+                let start_generation = state.begin_start(cause);
                 bump_event(&event_tx, &event_version);
                 (state.config.clone(), start_generation)
             } else {
@@ -472,6 +614,7 @@ impl ProcessManager {
                         state.status = ProcessStatus::Error(e.clone());
                         let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
+                        state.mark_failed(&e);
                     }
                     bump_error(&error_version, &process_error_versions, &id_owned);
                     bump_event(&event_tx, &event_version);
@@ -488,6 +631,7 @@ impl ProcessManager {
                         state.status = ProcessStatus::Error(e.clone());
                         let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
+                        state.mark_failed(&e);
                     }
                     bump_error(&error_version, &process_error_versions, &id_owned);
                     bump_event(&event_tx, &event_version);
@@ -574,15 +718,15 @@ impl ProcessManager {
                             return;
                         }
                         if let Some(state) = processes.get_mut(&id_owned) {
-                            state.status = ProcessStatus::Running;
+                            state.mark_running(Some(child.id()));
                             state.disk_log = disk_log.clone();
-                            push_in_memory_log(
-                                &mut state.logs,
+                            log_process_state_event(
+                                state,
                                 format!("[Started with PID {}]", child.id()),
                             );
                             if config_clone.log_to_disk && state.disk_log.is_none() {
                                 push_in_memory_log(
-                                    &mut state.logs,
+                                    state,
                                     "[Disk logging unavailable. See stderr for details.]"
                                         .to_string(),
                                 );
@@ -752,6 +896,17 @@ impl ProcessManager {
                                                     state,
                                                     format!("[Process exited with: {}]", status),
                                                 );
+                                                let exit = ExitSummary {
+                                                    code: status.code(),
+                                                    success: status.success(),
+                                                };
+                                                state.last_exit = Some(exit);
+                                                state.running_since = None;
+                                                state.record(
+                                                    ActivityKind::Exited,
+                                                    exit_text(exit),
+                                                    "",
+                                                );
                                                 if state.config.auto_restart
                                                     && managed_restart_active_now(&state.config)
                                                     && !state.suppress_restart_once
@@ -761,6 +916,7 @@ impl ProcessManager {
                                                         "[Managed process went down. Restarting...]"
                                                             .to_string(),
                                                     );
+                                                    state.restart_pending = true;
                                                     should_schedule_restart = true;
                                                 }
                                                 state.status = ProcessStatus::Stopped;
@@ -784,6 +940,12 @@ impl ProcessManager {
                                                     process_group,
                                                 );
                                                 state.status = ProcessStatus::Error(e.to_string());
+                                                state.running_since = None;
+                                                state.record(
+                                                    ActivityKind::Failed,
+                                                    format!("Lost track of the process: {e}"),
+                                                    "",
+                                                );
                                                 state.child = None;
                                                 state.disk_log = None;
                                                 let _ = clear_resource_usage(state);
@@ -836,6 +998,7 @@ impl ProcessManager {
                         state.status = ProcessStatus::Error(e.to_string());
                         let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start: {}]", e));
+                        state.mark_failed(&e.to_string());
                     }
                     bump_error(&error_version, &process_error_versions, &id_owned);
                     bump_event(&event_tx, &event_version);
@@ -903,14 +1066,17 @@ impl ProcessManager {
                     if let Some(state) = processes.get_mut(&id_owned) {
                         state.disk_log = disk_log.clone();
                         if output.status.success() {
-                            state.status = ProcessStatus::Running;
+                            // The status poll may have seen it running first.
+                            if state.status != ProcessStatus::Running {
+                                state.mark_running(None);
+                            }
                             log_process_state_event(
                                 state,
                                 format!("[Docker container '{}' started]", container_name),
                             );
                             if config_clone.log_to_disk && state.disk_log.is_none() {
                                 push_in_memory_log(
-                                    &mut state.logs,
+                                    state,
                                     "[Disk logging unavailable. See stderr for details.]"
                                         .to_string(),
                                 );
@@ -923,6 +1089,7 @@ impl ProcessManager {
                                 state,
                                 format!("[Failed to start: {}]", stderr),
                             );
+                            state.mark_failed(&stderr);
                             state.disk_log = None;
                             bump_error(&error_version, &process_error_versions, &id_owned);
                         }
@@ -935,6 +1102,7 @@ impl ProcessManager {
                         state.status = ProcessStatus::Error(e.to_string());
                         let _ = clear_resource_usage(state);
                         log_process_state_event(state, format!("[Failed to start docker: {}]", e));
+                        state.mark_failed(&e.to_string());
                         state.disk_log = None;
                     }
                     bump_error(&error_version, &process_error_versions, &id_owned);
@@ -1031,7 +1199,7 @@ impl ProcessManager {
                                     formatted = line.clone();
                                     has_error = line_has_error(&formatted);
                                     disk_log = state.disk_log.clone();
-                                    push_in_memory_log(&mut state.logs, formatted.clone());
+                                    push_in_memory_log(state, formatted.clone());
                                     updated = true;
                                 }
                             } else {
@@ -1060,19 +1228,30 @@ impl ProcessManager {
         });
     }
 
-    /// Stop a process
+    /// Stop a process at the user's request.
     pub fn stop_process(&self, id: &str) {
+        self.stop_process_by(id, "You");
+    }
+
+    /// Stop a process, recording `cause` in its activity.
+    pub fn stop_process_by(&self, id: &str, cause: &str) {
         stop_process_inner(
             id,
+            cause,
             self.processes.clone(),
             self.event_tx.clone(),
             self.event_version.clone(),
         );
     }
 
-    /// Restart a process
+    /// Restart a process at the user's request.
     pub fn restart_process(&self, id: &str) {
-        self.stop_process(id);
+        self.restart_process_by(id, "You");
+    }
+
+    /// Restart a process, recording `cause` in its activity.
+    pub fn restart_process_by(&self, id: &str, cause: &str) {
+        self.stop_process_by(id, cause);
 
         // Wait for process to stop (max 5 seconds)
         let start = std::time::Instant::now();
@@ -1087,7 +1266,7 @@ impl ProcessManager {
             }
         }
 
-        self.start_process(id);
+        self.start_process_by(id, cause);
     }
 
     /// Start all processes
@@ -1101,16 +1280,20 @@ impl ProcessManager {
                 .collect()
         };
         for id in ids {
-            self.start_process(&id);
+            self.start_process_by(&id, "Start all");
         }
     }
 
     /// Start selected processes that opt into Start All. Returns the number requested.
-    pub fn start_processes_respecting_start_all(&self, process_ids: &[String]) -> usize {
+    pub fn start_processes_respecting_start_all(
+        &self,
+        process_ids: &[String],
+        cause: &str,
+    ) -> usize {
         let ids =
             self.process_ids_responding_to_stack_control(process_ids, StackControlAction::Start);
         for id in &ids {
-            self.start_process(id);
+            self.start_process_by(id, cause);
         }
         ids.len()
     }
@@ -1127,7 +1310,7 @@ impl ProcessManager {
         };
 
         for id in ids {
-            self.start_process(&id);
+            self.start_process_by(&id, "Auto-start");
         }
     }
 
@@ -1142,16 +1325,16 @@ impl ProcessManager {
                 .collect()
         };
         for id in ids {
-            self.stop_process(&id);
+            self.stop_process_by(&id, "Stop all");
         }
     }
 
     /// Stop selected processes that opt into Stop All. Returns the number requested.
-    pub fn stop_processes_respecting_stop_all(&self, process_ids: &[String]) -> usize {
+    pub fn stop_processes_respecting_stop_all(&self, process_ids: &[String], cause: &str) -> usize {
         let ids =
             self.process_ids_responding_to_stack_control(process_ids, StackControlAction::Stop);
         for id in &ids {
-            self.stop_process(id);
+            self.stop_process_by(id, cause);
         }
         ids.len()
     }
@@ -1163,7 +1346,7 @@ impl ProcessManager {
             processes.keys().cloned().collect()
         };
         for id in &ids {
-            self.stop_process(id);
+            self.stop_process_by(id, "Reload of processes.json");
         }
 
         let _ = self.wait_for_processes_to_stop(&ids, Duration::from_secs(5));
@@ -1208,7 +1391,7 @@ impl ProcessManager {
         };
 
         for id in &ids {
-            self.stop_process(id);
+            self.stop_process_by(id, "Restart all");
         }
 
         // Wait for all processes to stop (max 5 seconds)
@@ -1217,17 +1400,21 @@ impl ProcessManager {
         }
 
         for id in ids {
-            self.start_process(&id);
+            self.start_process_by(&id, "Restart all");
         }
     }
 
     /// Restart selected processes that opt into Restart All. Returns the number requested.
-    pub fn restart_processes_respecting_restart_all(&self, process_ids: &[String]) -> usize {
+    pub fn restart_processes_respecting_restart_all(
+        &self,
+        process_ids: &[String],
+        cause: &str,
+    ) -> usize {
         let ids =
             self.process_ids_responding_to_stack_control(process_ids, StackControlAction::Restart);
 
         for id in &ids {
-            self.stop_process(id);
+            self.stop_process_by(id, cause);
         }
 
         if !self.wait_for_processes_to_stop(&ids, Duration::from_secs(5)) {
@@ -1235,7 +1422,7 @@ impl ProcessManager {
         }
 
         for id in &ids {
-            self.start_process(id);
+            self.start_process_by(id, cause);
         }
 
         ids.len()
@@ -1320,7 +1507,7 @@ impl ProcessManager {
             self.get_status(&process_id),
             Some(ProcessStatus::Running | ProcessStatus::Starting | ProcessStatus::Stopping)
         ) {
-            self.stop_process(&process_id);
+            self.stop_process_by(&process_id, "Reload from processes.json");
             let _ = self.wait_for_processes_to_stop(&[process_id.clone()], Duration::from_secs(5));
         }
 
@@ -1339,8 +1526,32 @@ impl ProcessManager {
         let processes = self.processes.lock().unwrap();
         processes.get(id).map(|state| {
             let start = state.logs.len().saturating_sub(limit);
-            state.logs[start..].to_vec()
+            state.logs[start..]
+                .iter()
+                .map(|line| line.text.clone())
+                .collect()
         })
+    }
+
+    /// Empties the in-memory log of a process. Line numbers keep counting; disk logs are untouched.
+    pub fn clear_logs(&self, id: &str) {
+        let mut processes = self.processes.lock().unwrap();
+        if let Some(state) = processes.get_mut(id) {
+            state.logs.clear();
+        }
+        drop(processes);
+        self.notify();
+    }
+
+    /// Adds an entry to a process's activity that did not come from the manager itself, such
+    /// as saved settings.
+    pub fn record_activity(&self, id: &str, kind: ActivityKind, text: &str, cause: &str) {
+        let mut processes = self.processes.lock().unwrap();
+        if let Some(state) = processes.get_mut(id) {
+            state.record(kind, text, cause);
+        }
+        drop(processes);
+        self.notify();
     }
 
     pub fn get_log_count(&self, id: &str) -> Option<usize> {
@@ -1387,21 +1598,28 @@ impl ProcessManager {
         &self,
         selected_id: Option<&str>,
         log_limit: usize,
+        include_stack_logs: bool,
     ) -> UiRuntimeSnapshot {
         let processes = self.processes.lock().unwrap();
-        let mut counts = ProcessCounts {
-            total: processes.len(),
-            ..ProcessCounts::default()
+        let mut snapshot = UiRuntimeSnapshot {
+            counts: ProcessCounts {
+                total: processes.len(),
+                ..ProcessCounts::default()
+            },
+            statuses: HashMap::with_capacity(processes.len()),
+            resource_usage: HashMap::with_capacity(processes.len()),
+            info: HashMap::with_capacity(processes.len()),
+            ..UiRuntimeSnapshot::default()
         };
-        let mut statuses = HashMap::with_capacity(processes.len());
-        let mut resource_usage = HashMap::with_capacity(processes.len());
-        let mut selected_logs = Vec::new();
-        let mut selected_log_count = 0usize;
 
         for (id, state) in processes.iter() {
-            statuses.insert(id.clone(), state.status.clone());
-            resource_usage.insert(id.clone(), state.resource_usage);
+            snapshot.statuses.insert(id.clone(), state.status.clone());
+            snapshot
+                .resource_usage
+                .insert(id.clone(), state.resource_usage);
+            snapshot.info.insert(id.clone(), state.runtime_info());
 
+            let counts = &mut snapshot.counts;
             match &state.status {
                 ProcessStatus::Running => counts.running += 1,
                 ProcessStatus::Stopped => counts.stopped += 1,
@@ -1411,19 +1629,27 @@ impl ProcessManager {
             }
 
             if selected_id == Some(id.as_str()) {
-                selected_log_count = state.logs.len();
                 let start = state.logs.len().saturating_sub(log_limit);
-                selected_logs = state.logs[start..].to_vec();
+                snapshot.selected_logs = state.logs[start..].to_vec();
+                snapshot.selected_first_line =
+                    state.log_total - snapshot.selected_logs.len() as u64 + 1;
+                snapshot.selected_activity = state.activity.iter().cloned().collect();
+                snapshot.selected_history = state.resource_history.iter().copied().collect();
+            }
+
+            if include_stack_logs {
+                let start = state.logs.len().saturating_sub(STACK_LOG_LINES_PER_PROCESS);
+                snapshot.stack_logs.extend(
+                    state.logs[start..]
+                        .iter()
+                        .map(|line| (id.clone(), line.clone())),
+                );
             }
         }
 
-        UiRuntimeSnapshot {
-            counts,
-            statuses,
-            resource_usage,
-            selected_logs,
-            selected_log_count,
-        }
+        // Stable sort: lines with the same timestamp keep their order within a process.
+        snapshot.stack_logs.sort_by_key(|(_, line)| line.at);
+        snapshot
     }
 
     /// Check and update docker container status
@@ -1512,6 +1738,16 @@ fn refresh_resource_usage(processes: &Arc<Mutex<HashMap<String, ProcessState>>>)
             state.resource_usage = new_usage;
             updated = true;
         }
+    }
+
+    // One sample per process per tick, zero while it is not running, so every sparkline
+    // shares the same time axis.
+    for state in processes.values_mut() {
+        state.resource_history.push_back(state.resource_usage);
+        while state.resource_history.len() > RESOURCE_HISTORY_LIMIT {
+            state.resource_history.pop_front();
+        }
+        updated |= state.status == ProcessStatus::Running;
     }
 
     updated
@@ -1792,7 +2028,7 @@ fn append_runtime_log(
         };
         let has_error = line_has_error(&formatted);
         let disk_log = state.disk_log.clone();
-        push_in_memory_log(&mut state.logs, formatted.clone());
+        push_in_memory_log(state, formatted.clone());
         (disk_log, formatted, has_error)
     };
 
@@ -1807,13 +2043,25 @@ fn log_process_state_event(state: &mut ProcessState, message: String) {
     if let Some(file) = state.disk_log.clone() {
         write_disk_log_line(&file, &message);
     }
-    push_in_memory_log(&mut state.logs, message);
+    push_in_memory_log(state, message);
 }
 
-fn push_in_memory_log(logs: &mut Vec<String>, line: String) {
-    logs.push(line);
-    if logs.len() > IN_MEMORY_LOG_LIMIT {
-        logs.remove(0);
+fn push_in_memory_log(state: &mut ProcessState, line: String) {
+    state.logs.push(LogLine {
+        text: line,
+        at: chrono::Local::now(),
+    });
+    state.log_total += 1;
+    if state.logs.len() > IN_MEMORY_LOG_LIMIT {
+        state.logs.remove(0);
+    }
+}
+
+fn exit_text(exit: ExitSummary) -> String {
+    match exit.code {
+        Some(code) => format!("Exited with code {code}"),
+        None if exit.success => "Exited".to_string(),
+        None => "Ended by a signal".to_string(),
     }
 }
 
@@ -2115,6 +2363,7 @@ fn start_request_is_current_state(state: &ProcessState, start_generation: u64) -
 
 fn stop_process_inner(
     id: &str,
+    cause: &str,
     processes_arc: Arc<Mutex<HashMap<String, ProcessState>>>,
     event_tx: watch::Sender<u64>,
     event_version: Arc<AtomicU64>,
@@ -2125,12 +2374,18 @@ fn stop_process_inner(
     #[cfg(windows)]
     let mut job_to_close: Option<JobHandle> = None;
     let mut docker_container: Option<String> = None;
+    let mut docker_was_live = false;
 
     {
         let mut processes = processes_arc.lock().unwrap();
         if let Some(state) = processes.get_mut(id) {
             state.suppress_restart_once = true;
             state.start_generation = state.start_generation.wrapping_add(1);
+            state.stop_cause = cause.to_string();
+            if state.restart_pending {
+                state.restart_pending = false;
+                state.record(ActivityKind::Stopped, "Managed restart cancelled", cause);
+            }
             match state.config.process_type {
                 ProcessType::Process => {
                     if let Some(child) = state.child.take() {
@@ -2141,6 +2396,9 @@ fn stop_process_inner(
                             job_to_close = state.job.take();
                         }
                     } else {
+                        if state.status == ProcessStatus::Starting {
+                            state.record(ActivityKind::Stopped, "Start cancelled", cause);
+                        }
                         state.status = ProcessStatus::Stopped;
                         #[cfg(windows)]
                         {
@@ -2150,6 +2408,10 @@ fn stop_process_inner(
                     }
                 }
                 ProcessType::Docker => {
+                    docker_was_live = matches!(
+                        state.status,
+                        ProcessStatus::Running | ProcessStatus::Starting
+                    );
                     state.status = ProcessStatus::Stopping;
                     docker_container = Some(state.config.command.clone());
                 }
@@ -2205,6 +2467,7 @@ fn stop_process_inner(
                     log_process_state_event(state, format!("[Stop error: {}]", err));
                 }
                 log_process_state_event(state, "[Process stopped]".to_string());
+                state.mark_stopped();
                 state.status = ProcessStatus::Stopped;
                 state.disk_log = None;
                 let _ = clear_resource_usage(state);
@@ -2247,6 +2510,9 @@ fn stop_process_inner(
                         state.status = ProcessStatus::Stopped;
                     }
                 }
+                if docker_was_live {
+                    state.mark_stopped();
+                }
                 state.disk_log = None;
                 let _ = clear_resource_usage(state);
             }
@@ -2263,6 +2529,7 @@ enum SchedulerAction {
     },
     Stop {
         id: String,
+        cause: &'static str,
     },
 }
 
@@ -2297,12 +2564,7 @@ fn run_scheduler_tick(
                 let previous_active = schedule_runtime.last_restart_schedule_active;
 
                 if active && previous_active != Some(true) && process_is_dormant(state) {
-                    state.suppress_restart_once = false;
-                    state.status = ProcessStatus::Starting;
-                    state.logs.clear();
-                    state.disk_log = None;
-                    let _ = clear_resource_usage(state);
-                    state.start_generation = state.start_generation.wrapping_add(1);
+                    state.begin_start("Active hours began");
                     log_process_state_event(
                         state,
                         "[Managed restart schedule became active. Starting...]".to_string(),
@@ -2322,7 +2584,10 @@ fn run_scheduler_tick(
                         state,
                         "[Managed restart schedule became inactive. Stopping...]".to_string(),
                     );
-                    actions.push(SchedulerAction::Stop { id: id.clone() });
+                    actions.push(SchedulerAction::Stop {
+                        id: id.clone(),
+                        cause: "Active hours ended",
+                    });
                     updated = true;
                 }
 
@@ -2336,12 +2601,7 @@ fn run_scheduler_tick(
             {
                 schedule_runtime.last_scheduled_run_minute = Some(minute_key);
                 if process_is_dormant(state) {
-                    state.suppress_restart_once = false;
-                    state.status = ProcessStatus::Starting;
-                    state.logs.clear();
-                    state.disk_log = None;
-                    let _ = clear_resource_usage(state);
-                    state.start_generation = state.start_generation.wrapping_add(1);
+                    state.begin_start("Schedule");
                     log_process_state_event(
                         state,
                         "[Scheduled run triggered. Starting...]".to_string(),
@@ -2378,8 +2638,9 @@ fn run_scheduler_tick(
                 error_version.clone(),
                 process_error_versions.clone(),
             ),
-            SchedulerAction::Stop { id } => stop_process_inner(
+            SchedulerAction::Stop { id, cause } => stop_process_inner(
                 &id,
+                cause,
                 processes.clone(),
                 event_tx.clone(),
                 event_version.clone(),
@@ -2424,6 +2685,7 @@ fn schedule_managed_restart(
                 return;
             };
 
+            state.restart_pending = false;
             if state.suppress_restart_once {
                 state.suppress_restart_once = false;
                 return;
@@ -2440,13 +2702,9 @@ fn schedule_managed_restart(
                 return;
             }
 
-            state.suppress_restart_once = false;
-            state.status = ProcessStatus::Starting;
-            state.logs.clear();
-            state.disk_log = None;
-            let _ = clear_resource_usage(state);
-            state.start_generation = state.start_generation.wrapping_add(1);
-            (state.config.clone(), state.start_generation)
+            let cause = format!("Managed restart #{}", state.start_count.max(1));
+            let start_generation = state.begin_start(cause);
+            (state.config.clone(), start_generation)
         };
 
         bump_event(&event_tx, &event_version);
@@ -2869,7 +3127,10 @@ fn refresh_docker_status_inner(
                 if let Some(state) = processes.get_mut(id) {
                     if is_running {
                         if state.status != ProcessStatus::Running {
-                            state.status = ProcessStatus::Running;
+                            if state.start_cause.is_empty() {
+                                state.start_cause = "Found running".to_string();
+                            }
+                            state.mark_running(None);
                             updated = true;
                         }
                     } else if state.config.auto_restart
@@ -2881,10 +3142,17 @@ fn refresh_docker_status_inner(
                             state,
                             "[Container stopped unexpectedly. Restarting...]".to_string(),
                         );
+                        state.running_since = None;
+                        state.record(ActivityKind::Exited, "Container stopped", "");
                         state.status = ProcessStatus::Stopped;
+                        state.restart_pending = true;
                         should_schedule_restart = true;
                         updated = true;
                     } else {
+                        if state.status == ProcessStatus::Running {
+                            state.running_since = None;
+                            state.record(ActivityKind::Exited, "Container stopped", "");
+                        }
                         if state.status != ProcessStatus::Stopped {
                             state.status = ProcessStatus::Stopped;
                             updated = true;
@@ -3188,7 +3456,7 @@ mod tests {
             manager.processes.lock().unwrap()[&id]
                 .logs
                 .iter()
-                .any(|line| line.contains("Restarting..."))
+                .any(|line| line.text.contains("Restarting..."))
         }));
         manager.stop_process(&id);
         let generation = manager.processes.lock().unwrap()[&id].start_generation;

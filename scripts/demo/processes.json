@@ -1,0 +1,27 @@
+{
+  "stack_name": "Market Data",
+  "remote_control": {
+    "bind_address": "127.0.0.1",
+    "enabled": true,
+    "port": 47831
+  },
+  "log_directory": "logs",
+  "process_error_flash_seconds": 5,
+  "groups": [
+    { "id": "backend", "name": "backend", "process_ids": ["api", "worker"], "expanded": true },
+    { "id": "frontend", "name": "frontend", "process_ids": ["web", "storybook"], "expanded": true },
+    { "id": "data", "name": "data", "process_ids": ["postgres"], "expanded": true }
+  ],
+  "processes": [
+    { "id": "api", "name": "api", "command": "demo\\api.cmd --reload", "auto_start": true, "auto_restart": true, "log_to_disk": true },
+    { "id": "worker", "name": "worker", "command": "demo\\worker.cmd --queue default", "auto_start": true, "startup_delay_seconds": 1, "auto_restart": true },
+    { "id": "web", "name": "web", "command": "demo\\web.cmd", "auto_start": true },
+    { "id": "storybook", "name": "storybook", "command": "demo\\storybook.cmd", "respond_to_start_all": false, "respond_to_restart_all": false },
+    { "id": "postgres", "name": "postgres", "command": "postgres-dev", "process_type": "Docker", "respond_to_stop_all": false },
+    { "id": "ingest", "name": "ingest", "command": "demo\\ingest.cmd --feed cme", "auto_start": true, "auto_restart": true,
+      "restart_schedule": { "enabled": true, "active_hours": [8,9,10,11,12,13,14,15,16,17,18,19,32,33,34,35,36,37,38,39,40,41,42,43,56,57,58,59,60,61,62,63,64,65,66,67,80,81,82,83,84,85,86,87,88,89,90,91,104,105,106,107,108,109,110,111,112,113,114,115] } },
+    { "id": "backfill", "name": "nightly-backfill", "command": "demo\\backfill.cmd --days 1", "respond_to_start_all": false, "respond_to_restart_all": false,
+      "scheduled_run": { "enabled": true, "hour": 2 } },
+    { "id": "compare", "name": "compare-tool", "command": "demo\\compare.cmd --ui", "respond_to_start_all": false, "respond_to_stop_all": false, "respond_to_restart_all": false }
+  ]
+}

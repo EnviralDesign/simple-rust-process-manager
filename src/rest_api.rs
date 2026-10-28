@@ -19,6 +19,8 @@ use tokio::sync::{oneshot, watch};
 use crate::config::{AppConfig, ProcessGroupConfig, RemoteControlConfig};
 use crate::process_manager::{ProcessCounts, ProcessManager, ProcessRuntimeSnapshot};
 
+/// The cause a process's activity records for actions that arrive through the API.
+const API_CAUSE: &str = "Local API";
 const DEFAULT_LOG_LIMIT: usize = 200;
 const MAX_LOG_LIMIT: usize = 1_000;
 
@@ -547,11 +549,16 @@ async fn reload_stack(State(state): State<ApiState>) -> impl IntoResponse {
 }
 
 async fn start_process(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
-    process_action(&state.manager, id, "start", ProcessManager::start_process)
+    process_action(
+        &state.manager,
+        id,
+        "start",
+        ProcessManager::start_process_by,
+    )
 }
 
 async fn stop_process(State(state): State<ApiState>, Path(id): Path<String>) -> impl IntoResponse {
-    process_action(&state.manager, id, "stop", ProcessManager::stop_process)
+    process_action(&state.manager, id, "stop", ProcessManager::stop_process_by)
 }
 
 async fn restart_process(
@@ -562,7 +569,7 @@ async fn restart_process(
         &state.manager,
         id,
         "restart",
-        ProcessManager::restart_process,
+        ProcessManager::restart_process_by,
     )
 }
 
@@ -806,7 +813,7 @@ fn process_action(
     manager: &Arc<ProcessManager>,
     id: String,
     action: &'static str,
-    action_fn: fn(&ProcessManager, &str),
+    action_fn: fn(&ProcessManager, &str, &str),
 ) -> axum::response::Response {
     if manager.get_process_snapshot(&id).is_none() {
         return (
@@ -819,7 +826,7 @@ fn process_action(
             .into_response();
     }
 
-    action_fn(manager.as_ref(), &id);
+    action_fn(manager.as_ref(), &id, API_CAUSE);
 
     (
         StatusCode::OK,
@@ -871,9 +878,9 @@ fn group_action(
     let group_name = group.name.clone();
 
     let affected_count = match action {
-        "start" => manager.start_processes_respecting_start_all(&process_ids),
-        "stop" => manager.stop_processes_respecting_stop_all(&process_ids),
-        "restart" => manager.restart_processes_respecting_restart_all(&process_ids),
+        "start" => manager.start_processes_respecting_start_all(&process_ids, API_CAUSE),
+        "stop" => manager.stop_processes_respecting_stop_all(&process_ids, API_CAUSE),
+        "restart" => manager.restart_processes_respecting_restart_all(&process_ids, API_CAUSE),
         _ => 0,
     };
 
