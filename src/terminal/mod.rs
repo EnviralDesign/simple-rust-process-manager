@@ -52,11 +52,9 @@ pub struct ScreenSnapshot {
     pub lines: Vec<Vec<ScreenRun>>,
     pub cursor: Option<(usize, usize)>,
     pub alt: bool,
-    pub title: String,
     pub modes: InputModes,
     /// The process is still attached: keys and resizes reach it.
     pub live: bool,
-    pub revision: u64,
 }
 
 /// Cells of one style in a screen row.
@@ -166,10 +164,8 @@ impl TerminalSession {
             lines,
             cursor: self.term.cursor_visible.then_some((row, col)),
             alt: self.term.alt_active(),
-            title: self.term.title.clone(),
             modes: self.term.modes,
             live,
-            revision: self.term.revision,
         }
     }
 

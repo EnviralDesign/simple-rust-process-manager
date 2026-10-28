@@ -12,6 +12,7 @@ mod header;
 mod icons;
 mod overview;
 mod palette;
+mod screen;
 mod sidebar;
 mod stack_settings;
 mod theme;
@@ -32,7 +33,7 @@ use eframe::egui::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tokio::runtime::Runtime;
 
-use crate::config::{AppConfig, ProcessConfig, ProcessGroupConfig, ProcessType};
+use crate::config::{AppConfig, ProcessConfig, ProcessGroupConfig, ProcessType, TerminalMode};
 use crate::process_manager::{
     ProcessManager, ProcessResourceUsage, ProcessRuntimeInfo, ProcessStatus, UiRuntimeSnapshot,
 };
@@ -91,6 +92,10 @@ struct RuntimeToggles {
     open: Option<String>,
     /// `PM_SCREENSHOT_AFTER=<seconds>`: how long to let the stack run before the screenshot.
     screenshot_after: Duration,
+    /// `PM_TYPE=<keys>`: typed into the selected process's screen 1.5 s before the screenshot,
+    /// through the same path as the keyboard. `{enter}`, `{tab}`, `{esc}`, `{up}`, `{down}`,
+    /// `{left}`, `{right}` and `{ctrl-<letter>}` are keys; the rest is text.
+    type_keys: Option<String>,
 }
 
 impl RuntimeToggles {
@@ -105,6 +110,7 @@ impl RuntimeToggles {
             window_size: None,
             open: None,
             screenshot_after: Duration::from_secs(3),
+            type_keys: None,
         };
 
         toggles.renderer = match std::env::var("PM_RENDERER")
@@ -146,6 +152,7 @@ impl RuntimeToggles {
             Some(Vec2::new(w.trim().parse().ok()?, h.trim().parse().ok()?))
         });
         toggles.open = std::env::var("PM_OPEN").ok();
+        toggles.type_keys = std::env::var("PM_TYPE").ok();
         if let Some(seconds) = std::env::var("PM_SCREENSHOT_AFTER")
             .ok()
             .and_then(|value| value.trim().parse::<f32>().ok())
@@ -329,6 +336,8 @@ enum View {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessTab {
     Logs,
+    /// A terminal process's screen.
+    Screen,
     Settings,
     Activity,
 }
@@ -467,6 +476,8 @@ pub struct ProcessManagerApp {
     /// A line double-clicked to select its text: (process id, line number).
     frozen_log_line: Option<(String, u64)>,
     focus_log_filter: bool,
+    /// The Screen tab's state for terminal processes.
+    screen: screen::ScreenState,
     /// Narrow windows fold the command and badges away until asked.
     details_open: bool,
     last_error_version: u64,
@@ -489,6 +500,8 @@ pub struct ProcessManagerApp {
     snapshot_key: (Option<String>, bool),
     runtime_snapshot: UiRuntimeSnapshot,
     screenshot_requested: bool,
+    /// `PM_TYPE` has been typed.
+    typed: bool,
     launched_at: Instant,
     diagnostics: DiagnosticsState,
 }
@@ -573,6 +586,7 @@ impl ProcessManagerApp {
             log_selection: None,
             frozen_log_line: None,
             focus_log_filter: false,
+            screen: screen::ScreenState::default(),
             details_open: false,
             last_error_version: 0,
             last_process_error_versions,
@@ -595,6 +609,7 @@ impl ProcessManagerApp {
             runtime_snapshot,
             screenshot_requested: false,
             launched_at: Instant::now(),
+            typed: false,
             diagnostics: DiagnosticsState {
                 session_label,
                 renderer_backend,
@@ -633,6 +648,12 @@ impl ProcessManagerApp {
             "activity" => {
                 self.view = View::Process;
                 self.tab = ProcessTab::Activity;
+            }
+            "screen" => {
+                self.view = View::Process;
+                self.tab = ProcessTab::Screen;
+                // Chosen, so the default tab for the selection does not replace it.
+                self.screen.last_alt = self.selected_process.clone().map(|id| (id, false));
             }
             "palette" => self.palette = Some(palette::PaletteState::default()),
             "delete" => self.delete_process_id = self.selected_process.clone(),
@@ -908,6 +929,62 @@ impl ProcessManagerApp {
 
     fn select_process(&mut self, process_id: String) {
         self.navigate(Nav::Process(process_id));
+    }
+
+    /// Where a process's output opens: its screen when it is set to, or while a full-screen
+    /// program runs; otherwise its log.
+    fn output_tab_for(&self, process_id: &str) -> ProcessTab {
+        let mode = self
+            .config
+            .get_process(process_id)
+            .map(|p| p.terminal_mode)
+            .unwrap_or_default();
+        let alt = self.info_of(process_id).is_some_and(|i| i.alt_screen);
+        match mode {
+            TerminalMode::Screen => ProcessTab::Screen,
+            TerminalMode::Auto if alt => ProcessTab::Screen,
+            _ => ProcessTab::Logs,
+        }
+    }
+
+    /// Whether the console shows a Screen tab for this process.
+    fn has_screen(&self, process: &ProcessConfig) -> bool {
+        process.terminal_mode != TerminalMode::Off
+            || self.info_of(&process.id).is_some_and(|i| i.has_terminal)
+    }
+
+    /// Opens a newly selected process on its output tab (however it was selected), and in Auto
+    /// mode follows a program into full screen and back out.
+    fn follow_full_screen(&mut self) {
+        let Some(id) = self.selected_process.clone() else {
+            return;
+        };
+        let alt = self.info_of(&id).is_some_and(|i| i.alt_screen);
+        let previous = self.screen.last_alt.replace((id.clone(), alt));
+        if previous.as_ref().is_none_or(|(was_id, _)| *was_id != id)
+            && matches!(self.tab, ProcessTab::Logs | ProcessTab::Screen)
+        {
+            self.tab = self.output_tab_for(&id);
+        }
+        if self.view != View::Process {
+            return;
+        }
+        let Some(process) = self.config.get_process(&id) else {
+            return;
+        };
+        let mode = process.terminal_mode;
+        if self.tab == ProcessTab::Screen && !self.has_screen(process) {
+            self.set_tab(ProcessTab::Logs);
+            return;
+        }
+        let changed = previous.is_some_and(|(was_id, was)| was_id == id && was != alt);
+        if changed && mode == TerminalMode::Auto {
+            match (alt, self.tab) {
+                (true, ProcessTab::Logs) => self.set_tab(ProcessTab::Screen),
+                (false, ProcessTab::Screen) => self.set_tab(ProcessTab::Logs),
+                _ => {}
+            }
+        }
     }
 
     fn set_tab(&mut self, tab: ProcessTab) {
@@ -1743,7 +1820,8 @@ impl ProcessManagerApp {
             let cmd = input.modifiers.command;
             let shift = input.modifiers.shift;
             let pressed = |key| input.key_pressed(key);
-            if modal {
+            // A focused terminal screen takes every key, Ctrl+K included.
+            if modal || self.screen.focused {
                 return;
             }
             if cmd && pressed(Key::K) {
@@ -2201,14 +2279,17 @@ impl ProcessManagerApp {
 
         CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG))
-            .show(ctx, |ui| match self.view {
-                View::Process => match self.selected_process_config() {
-                    Some(process) => self.draw_console(ui, &process, tier),
-                    None => self.draw_empty_state(ui),
-                },
-                View::Overview => self.draw_overview(ui, tier),
-                View::StackSettings => self.draw_stack_settings(ui, tier),
-                View::NewProcess => self.draw_new_process(ui, tier),
+            .show(ctx, |ui| {
+                estimate_terminal_size(ui, tier);
+                match self.view {
+                    View::Process => match self.selected_process_config() {
+                        Some(process) => self.draw_console(ui, &process, tier),
+                        None => self.draw_empty_state(ui),
+                    },
+                    View::Overview => self.draw_overview(ui, tier),
+                    View::StackSettings => self.draw_stack_settings(ui, tier),
+                    View::NewProcess => self.draw_new_process(ui, tier),
+                }
             });
 
         self.draw_palette(ctx, tier);
@@ -2239,6 +2320,26 @@ enum Shortcut {
 }
 
 impl eframe::App for ProcessManagerApp {
+    /// `PM_TYPE`: focuses the screen, then feeds the keys in as if typed.
+    fn raw_input_hook(&mut self, _ctx: &Context, raw_input: &mut egui::RawInput) {
+        let Some(keys) = self.toggles.type_keys.clone() else {
+            return;
+        };
+        let at = self
+            .toggles
+            .screenshot_after
+            .saturating_sub(Duration::from_millis(1500));
+        if self.typed || self.launched_at.elapsed() < at {
+            return;
+        }
+        if !self.screen.focused {
+            self.screen.focus_request = true;
+            return;
+        }
+        self.typed = true;
+        raw_input.events.extend(screen::typed_events(&keys));
+    }
+
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let update_started = Instant::now();
         self.ensure_valid_selection();
@@ -2273,6 +2374,9 @@ impl eframe::App for ProcessManagerApp {
         self.maybe_request_attention(ctx);
         self.sync_rest_config_reload();
         self.refresh_runtime_snapshot(false);
+        self.follow_full_screen();
+        // Set again by the Screen tab if it is drawn and focused this frame.
+        self.screen.focused = false;
 
         if viewport_pos_changed || viewport_size_changed {
             ctx.request_repaint();
@@ -2455,6 +2559,30 @@ fn color_to_colorref(color: egui::Color32) -> u32 {
 
 fn window_title(stack_name: &str) -> String {
     format!("Process Manager - {}", stack_name)
+}
+
+/// The log area's size in cells, guessed from the central panel, for terminals that start while
+/// no log or screen is drawn (auto-start, or from the overview). The Logs and Screen tabs measure
+/// it exactly when they draw.
+fn estimate_terminal_size(ui: &egui::Ui, tier: Tier) {
+    let area = ui.max_rect();
+    let char_w = widgets::galley(ui, "0", theme::mono(12.0), theme::LOG_TEXT)
+        .size()
+        .x
+        .max(1.0);
+    let gutter = if tier <= Tier::Compact {
+        14.0
+    } else {
+        theme::GUTTER
+    };
+    // Gutters, line numbers, the stream column and the panel's edges.
+    let text_w = area.width() - gutter * 2.0 - 56.0 - 30.0 - 26.0;
+    // Header, stats, tabs and the log toolbar above the log.
+    let text_h = area.height() - 330.0;
+    crate::process_manager::set_terminal_size(
+        (text_w / char_w) as usize,
+        (text_h / theme::LOG_ROW_HEIGHT) as usize,
+    );
 }
 
 fn copy_text_to_clipboard(text: &str) -> Result<(), String> {

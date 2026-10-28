@@ -24,6 +24,8 @@ enum Command {
     Restart(String),
     Edit(String),
     Activity(String),
+    Screen(String),
+    Interrupt(String),
     CopyCommand(String, String),
     Stack(StackAction),
     Overview,
@@ -89,6 +91,24 @@ impl ProcessManagerApp {
                 "",
                 Command::Activity(process.id.clone()),
             );
+            if self.has_screen(&process) {
+                add(
+                    &section,
+                    format!("Show {} screen", process.name),
+                    "Its terminal, where you can type into it".into(),
+                    "",
+                    Command::Screen(process.id.clone()),
+                );
+                if live {
+                    add(
+                        &section,
+                        format!("Send Ctrl+C to {}", process.name),
+                        "Interrupt it, as Ctrl+C in a terminal does".into(),
+                        "",
+                        Command::Interrupt(process.id.clone()),
+                    );
+                }
+            }
             add(
                 &section,
                 "Copy the command".into(),
@@ -202,6 +222,10 @@ impl ProcessManagerApp {
             Command::Activity(id) => {
                 self.open_process_tab(id, ProcessTab::Activity);
             }
+            Command::Screen(id) => {
+                self.open_process_tab(id, ProcessTab::Screen);
+            }
+            Command::Interrupt(id) => self.send_to_terminal(&id, vec![0x03]),
             Command::CopyCommand(command, name) => {
                 self.copy_text(&command, format!("Copied the command of {name}"))
             }

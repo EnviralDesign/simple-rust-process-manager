@@ -2706,10 +2706,25 @@ fn command_parts(
 
 /// The size new terminals start at, in cells: the console's log area, as the UI last measured it.
 static TERMINAL_SIZE: Mutex<(usize, usize)> = Mutex::new((120, 32));
+static TERMINAL_SIZE_KNOWN: AtomicBool = AtomicBool::new(false);
 
-/// Called by the UI with the size of its log area, so programs format for what is visible.
+/// Called by the UI with the size of its log area, so programs format for what is visible. Never
+/// below 100 × 24: output laid out for a narrow window stays broken in the log after the window
+/// grows, while a wide line in a narrow window can be wrapped. (The Screen tab sizes full-screen
+/// programs to the panel exactly.)
 pub fn set_terminal_size(cols: usize, rows: usize) {
-    *TERMINAL_SIZE.lock().unwrap() = (cols.clamp(40, 500), rows.clamp(10, 300));
+    *TERMINAL_SIZE.lock().unwrap() = (cols.clamp(100, 500), rows.clamp(24, 300));
+    TERMINAL_SIZE_KNOWN.store(true, Ordering::Relaxed);
+}
+
+/// The size for a terminal starting now. Auto-start runs before the window's first frame, so a
+/// start waits a moment for the window to say how big its log area is.
+fn terminal_size_for_start() -> (usize, usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !TERMINAL_SIZE_KNOWN.load(Ordering::Relaxed) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    *TERMINAL_SIZE.lock().unwrap()
 }
 
 /// Spawns a command in a pseudo-terminal. Returns the child, the terminal's master end, and the
@@ -2951,7 +2966,7 @@ fn spawn_terminal(
     working_dir: &str,
 ) -> Result<(ManagedChild, Output, String), String> {
     let (program, args, program_label) = command_parts(program, args, working_dir)?;
-    let size = *TERMINAL_SIZE.lock().unwrap();
+    let size = terminal_size_for_start();
     let (child, master, reader, writer) = spawn_in_terminal(&program, &args, working_dir, size)?;
     let (done, reader_done) = std::sync::mpsc::channel();
     let input = crate::terminal::spawn_input_writer(writer);
@@ -3773,6 +3788,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn terminal_processes_log_their_screen_and_keep_colour() {
+        super::set_terminal_size(100, 30);
         let script =
             std::env::temp_dir().join(format!("procman-term-{}.cmd", uuid::Uuid::new_v4()));
         // A coloured line, a "progress bar" redrawn with carriage returns, and a final line.
@@ -3818,6 +3834,42 @@ mod tests {
         assert!(manager
             .terminal(&id)
             .is_some_and(|t| !t.lock().unwrap().is_live()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_processes_take_typed_input() {
+        super::set_terminal_size(100, 30);
+        let manager = ProcessManager::new();
+        let mut config = ProcessConfig::new(
+            "shell".to_string(),
+            "cmd /Q /K".to_string(),
+            String::new(),
+            ProcessType::Process,
+        );
+        config.terminal_mode = crate::config::TerminalMode::Screen;
+        let id = config.id.clone();
+        manager.add_process(config);
+        manager.start_process(&id);
+        assert!(wait_until(|| manager
+            .terminal(&id)
+            .is_some_and(|t| t.lock().unwrap().is_live())));
+        let terminal = manager.terminal(&id).unwrap();
+        terminal
+            .lock()
+            .unwrap()
+            .send(b"echo one & echo from-input\rexit 5\r".to_vec());
+        let exited = wait_until(|| {
+            manager
+                .get_recent_logs(&id, 100)
+                .unwrap_or_default()
+                .iter()
+                .any(|line| line.starts_with("[Process exited"))
+        });
+        let logs = manager.get_recent_logs(&id, 100).unwrap_or_default();
+        assert!(exited, "{logs:?}");
+        assert!(logs.iter().any(|l| l == "from-input"), "{logs:?}");
+        assert!(logs.contains(&"[Process exited with: exit code: 5]".to_string()));
     }
 
     #[cfg(windows)]

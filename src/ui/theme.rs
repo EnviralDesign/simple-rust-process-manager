@@ -61,6 +61,43 @@ pub fn hit_fill() -> Color32 {
     Color32::from_rgba_unmultiplied(0xe3, 0xa6, 0x3a, 82)
 }
 
+/// The 16 named terminal colours, tuned to read on `LOG_BG`. These are the program's colours,
+/// not status: they show only inside log lines and terminal screens.
+const TERMINAL_16: [Color32; 16] = [
+    Color32::from_rgb(0x3b, 0x41, 0x4b), // black: lifted so it shows on the log background
+    Color32::from_rgb(0xe8, 0x76, 0x76),
+    Color32::from_rgb(0x86, 0xc9, 0x7d),
+    Color32::from_rgb(0xe0, 0xbd, 0x74),
+    Color32::from_rgb(0x7f, 0xa2, 0xf0),
+    Color32::from_rgb(0xc3, 0x93, 0xe6),
+    Color32::from_rgb(0x6e, 0xc4, 0xd2),
+    Color32::from_rgb(0xc9, 0xce, 0xd6),
+    Color32::from_rgb(0x67, 0x6f, 0x7c),
+    Color32::from_rgb(0xff, 0x93, 0x93),
+    Color32::from_rgb(0xa4, 0xe0, 0x9a),
+    Color32::from_rgb(0xf2, 0xd3, 0x8e),
+    Color32::from_rgb(0xa3, 0xb8, 0xff),
+    Color32::from_rgb(0xdb, 0xb2, 0xf5),
+    Color32::from_rgb(0x8f, 0xdc, 0xe8),
+    Color32::from_rgb(0xf2, 0xf4, 0xf7),
+];
+
+/// A terminal colour by xterm index: the 16 named ones, the 6×6×6 cube, then 24 greys.
+pub fn terminal_color(index: u8) -> Color32 {
+    match index {
+        0..=15 => TERMINAL_16[index as usize],
+        16..=231 => {
+            let i = index - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            Color32::from_rgb(level(i / 36), level((i / 6) % 6), level(i % 6))
+        }
+        _ => {
+            let v = 8 + (index - 232) * 10;
+            Color32::from_rgb(v, v, v)
+        }
+    }
+}
+
 // Corners.
 pub const RADIUS: u8 = 6;
 pub const RADIUS_CARD: u8 = 8;

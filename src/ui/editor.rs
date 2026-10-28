@@ -12,7 +12,8 @@ use eframe::egui::{
 
 use crate::config::{
     weekly_hour_index, ManagedRestartSchedule, ProcessConfig, ProcessType, ScheduledRun,
-    ScheduledRunMode, DEFAULT_LOG_ROTATION_COUNT, DEFAULT_STARTUP_DELAY_SECONDS, WEEKLY_HOUR_COUNT,
+    ScheduledRunMode, TerminalMode, DEFAULT_LOG_ROTATION_COUNT, DEFAULT_STARTUP_DELAY_SECONDS,
+    WEEKLY_HOUR_COUNT,
 };
 use crate::process_manager::{ActivityKind, ProcessStatus};
 
@@ -43,6 +44,7 @@ pub(super) struct ProcessDraft {
     respond_to_restart_all: bool,
     log_to_disk: bool,
     log_rotation_count: String,
+    terminal_mode: TerminalMode,
 }
 
 impl Default for ProcessDraft {
@@ -63,6 +65,7 @@ impl Default for ProcessDraft {
             respond_to_restart_all: true,
             log_to_disk: false,
             log_rotation_count: DEFAULT_LOG_ROTATION_COUNT.to_string(),
+            terminal_mode: TerminalMode::Off,
         }
     }
 }
@@ -85,6 +88,7 @@ impl ProcessDraft {
             respond_to_restart_all: process.respond_to_restart_all,
             log_to_disk: process.log_to_disk,
             log_rotation_count: process.log_rotation_count.to_string(),
+            terminal_mode: process.terminal_mode,
         }
     }
 
@@ -155,6 +159,7 @@ impl ProcessDraft {
         process.respond_to_restart_all = self.respond_to_restart_all;
         process.log_to_disk = self.log_to_disk;
         process.log_rotation_count = keep.unwrap_or(DEFAULT_LOG_ROTATION_COUNT);
+        process.terminal_mode = self.terminal_mode;
         Ok(process)
     }
 
@@ -164,6 +169,7 @@ impl ProcessDraft {
             || self.working_directory.trim() != other.working_directory.trim()
             || self.process_type != other.process_type
             || self.log_to_disk != other.log_to_disk
+            || self.terminal_mode != other.terminal_mode
     }
 }
 
@@ -353,7 +359,7 @@ impl ProcessManagerApp {
                     self.set_banner(format!("Saved {} and restarted it", process.name));
                 } else if running && launch_changed {
                     self.set_banner(format!(
-                        "Saved {}. The new command and folder apply at its next start.",
+                        "Saved {}. The changes apply at its next start; Save and restart applies them now.",
                         process.name
                     ));
                 } else {
@@ -642,6 +648,9 @@ fn general_card(ui: &mut Ui, editor: &mut Editor) {
             ui,
             if docker {
                 "Started with docker start -a. Containers keep running when Process Manager closes."
+            } else if draft.terminal_mode != TerminalMode::Off {
+                "Runs in a terminal Process Manager draws, with no window of its own. Stop ends \
+                 its whole process tree."
             } else {
                 "Runs without a console window. Stop ends its whole process tree."
             },
@@ -661,6 +670,31 @@ fn general_card(ui: &mut Ui, editor: &mut Editor) {
                 ui,
                 "Empty means the executable's folder. A relative path moves with the stack.",
             );
+
+            field_label(ui, "Output");
+            let label = format::terminal_mode_label(draft.terminal_mode);
+            let button = Btn::new(label).with_icon(Icon::CaretDown).show(ui);
+            Popup::menu(&button)
+                .frame(widgets::popup_frame())
+                .align(RectAlign::BOTTOM_START)
+                .gap(4.0)
+                .show(|ui| {
+                    ui.set_min_width(width.min(280.0));
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for mode in format::TERMINAL_MODES {
+                        let on = mode == draft.terminal_mode;
+                        let text = format!(
+                            "{}{}",
+                            if on { "✓  " } else { "    " },
+                            format::terminal_mode_label(mode)
+                        );
+                        if widgets::menu_item(ui, &text, None, false, true).clicked() {
+                            draft.terminal_mode = mode;
+                            ui.close();
+                        }
+                    }
+                });
+            field_hint(ui, format::terminal_mode_hint(draft.terminal_mode));
         }
     });
 }

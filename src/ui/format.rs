@@ -5,6 +5,7 @@ use chrono::{Datelike, Duration as ChronoDuration, Local, Timelike};
 
 use crate::config::{
     ManagedRestartSchedule, ProcessConfig, ProcessType, ScheduledRun, ScheduledRunMode,
+    TerminalMode,
 };
 use crate::log_classification::contains_error_indicator;
 use crate::process_manager::{ProcessResourceUsage, ProcessRuntimeInfo, ProcessStatus};
@@ -240,11 +241,49 @@ pub fn skip_text(process: &ProcessConfig) -> String {
 }
 
 /// The badges under a process's name.
+/// The Output choices in a process's settings, in menu order.
+pub const TERMINAL_MODES: [TerminalMode; 3] =
+    [TerminalMode::Off, TerminalMode::Auto, TerminalMode::Screen];
+
+/// A terminal mode as the Output menu names it.
+pub fn terminal_mode_label(mode: TerminalMode) -> &'static str {
+    match mode {
+        TerminalMode::Off => "Plain output",
+        TerminalMode::Auto => "Terminal",
+        TerminalMode::Screen => "Terminal, opens on its screen",
+    }
+}
+
+/// What a terminal mode does, under the Output menu.
+pub fn terminal_mode_hint(mode: TerminalMode) -> &'static str {
+    match mode {
+        TerminalMode::Off => {
+            "Read through pipes, as before 2.1: plain lines, no colour. Tools that need a \
+             terminal may refuse to start or draw badly."
+        }
+        TerminalMode::Auto => {
+            "Runs in a terminal. The log keeps the program's colours and progress bars update \
+             in place; a full-screen program switches the console to its screen."
+        }
+        TerminalMode::Screen => {
+            "Runs in a terminal and opens on its screen, where you can type into it. Its \
+             lines still reach the log."
+        }
+    }
+}
+
 pub fn badges(process: &ProcessConfig) -> Vec<String> {
     let mut badges = vec![match process.process_type {
         ProcessType::Process => "Process".to_string(),
         ProcessType::Docker => "Docker container".to_string(),
     }];
+    if process.process_type == ProcessType::Process {
+        match process.terminal_mode {
+            TerminalMode::Off => {}
+            TerminalMode::Auto => badges.push("In a terminal".into()),
+            TerminalMode::Screen => badges.push("In a terminal · opens on its screen".into()),
+        }
+    }
     if process.auto_start {
         badges.push(if process.startup_delay_seconds > 0 {
             format!("Auto-start after {} s", process.startup_delay_seconds)

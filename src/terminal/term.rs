@@ -1127,6 +1127,24 @@ mod tests {
     }
 
     #[test]
+    fn rich_table_cells_keep_their_colour() {
+        let mut term = Term::new(40, 4);
+        feed(
+            &mut term,
+            "\u{2502} cme   \u{2502}\x1b[32m\x1b[1Cok     \x1b[m\u{2502}\r\n",
+        );
+        let (text, spans) = term.screen()[0].text_and_spans();
+        assert_eq!(text, "\u{2502} cme   \u{2502} ok     \u{2502}");
+        let ok = text.find("ok").unwrap();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.0 <= ok && ok < s.1 && s.2.fg == TermColor::Indexed(2)),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
     fn answers_cursor_position_queries() {
         let mut term = Term::new(10, 4);
         feed(&mut term, "\x1b[3;5H\x1b[6n");

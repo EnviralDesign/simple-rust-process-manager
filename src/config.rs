@@ -1021,6 +1021,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_mode_defaults_to_off_and_off_is_not_written() {
+        let old: ProcessConfig =
+            serde_json::from_str(r#"{"id":"a","name":"a","command":"run"}"#).unwrap();
+        assert_eq!(old.terminal_mode, TerminalMode::Off);
+        assert!(!serde_json::to_string(&old)
+            .unwrap()
+            .contains("terminal_mode"));
+        for mode in [TerminalMode::Auto, TerminalMode::Screen] {
+            let mut process = old.clone();
+            process.terminal_mode = mode;
+            let saved = serde_json::to_string(&process).unwrap();
+            let loaded: ProcessConfig = serde_json::from_str(&saved).unwrap();
+            assert_eq!(loaded.terminal_mode, mode);
+        }
+    }
+
+    #[test]
     fn missing_startup_delay_defaults_to_zero_and_serializes() {
         let raw = r#"{
             "stack_name": "Test Stack",

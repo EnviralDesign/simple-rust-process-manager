@@ -6,8 +6,9 @@ use eframe::egui::{
     RectAlign, ScrollArea, Sense, Stroke, StrokeKind, TextFormat, Ui,
 };
 
-use crate::config::{ProcessConfig, ProcessType};
+use crate::config::{ProcessConfig, ProcessType, TerminalMode};
 use crate::process_manager::{ActivityKind, ProcessStatus};
+use crate::terminal::LogSpan;
 
 use super::format::{self, LineKind, Stream, Tone};
 use super::icons::{self, Icon};
@@ -56,6 +57,7 @@ impl ProcessManagerApp {
 
         match self.tab {
             ProcessTab::Logs => self.draw_logs(&mut ui, process, tier, gutter),
+            ProcessTab::Screen => self.draw_screen(&mut ui, process, tier, gutter),
             ProcessTab::Settings => self.draw_process_settings(&mut ui, process, tier, gutter),
             ProcessTab::Activity => self.draw_activity(&mut ui, process, gutter),
         }
@@ -644,7 +646,7 @@ impl ProcessManagerApp {
             .as_ref()
             .is_some_and(|e| e.process_id.as_deref() == Some(process.id.as_str()) && e.is_dirty());
         let activity = self.runtime_snapshot.selected_activity.len().to_string();
-        let tabs = [
+        let mut tabs = vec![
             (ProcessTab::Logs, "Logs", logs_count),
             (
                 ProcessTab::Settings,
@@ -657,17 +659,31 @@ impl ProcessManagerApp {
             ),
             (ProcessTab::Activity, "Activity", activity),
         ];
+        if self.has_screen(process) {
+            let live = self.info_of(&process.id).is_some_and(|i| i.alt_screen);
+            let screen = (
+                ProcessTab::Screen,
+                "Screen",
+                if live {
+                    "live".to_string()
+                } else {
+                    String::new()
+                },
+            );
+            // A process that opens on its screen lists it first.
+            let at = usize::from(process.terminal_mode != TerminalMode::Screen);
+            tabs.insert(at, screen);
+        }
         let mut x = outer.left() + gutter;
         for (tab, label, count) in tabs {
+            let count_color = match count.as_str() {
+                "unsaved" => AMBER,
+                "live" => GREEN,
+                _ => FAINT,
+            };
             let label_g = widgets::galley(ui, label, bold(13.0), MUTED);
-            let count_g = (!count.is_empty()).then(|| {
-                widgets::galley(
-                    ui,
-                    &count,
-                    bold(11.0),
-                    if count == "unsaved" { AMBER } else { FAINT },
-                )
-            });
+            let count_g =
+                (!count.is_empty()).then(|| widgets::galley(ui, &count, bold(11.0), count_color));
             let w = 24.0 + label_g.size().x + count_g.as_ref().map_or(0.0, |g| g.size().x + 7.0);
             let rect = Rect::from_min_max(pos2(x, base_y - 36.0), pos2(x + w, base_y));
             let response = ui.interact(rect, ui.id().with(("tab", label)), Sense::click());
@@ -685,12 +701,11 @@ impl ProcessManagerApp {
                 color,
             );
             if let Some(g) = count_g {
-                let c = if count == "unsaved" { AMBER } else { FAINT };
                 widgets::paint_galley_left(
                     &painter,
                     pos2(rect.left() + 12.0 + lw + 7.0, rect.center().y + 0.5),
                     g,
-                    c,
+                    count_color,
                 );
             }
             if on {
@@ -1026,6 +1041,30 @@ impl ProcessManagerApp {
         );
         log_ui.set_clip_rect(inner);
 
+        // A terminal started from here gets this area's size, so programs format their
+        // output (tables, progress bars) for the width that shows.
+        {
+            let char_w = widgets::galley(&log_ui, "0", mono(12.0), LOG_TEXT)
+                .size()
+                .x
+                .max(1.0);
+            let number_w = if tier <= Tier::Compact {
+                44.0
+            } else {
+                GUTTER_NUMBER
+            };
+            let time_w = if self.show_log_time && tier > Tier::Tiny {
+                GUTTER_TIME
+            } else {
+                0.0
+            };
+            let text_w = inner.width() - number_w - time_w - GUTTER_STREAM - 24.0;
+            crate::process_manager::set_terminal_size(
+                (text_w / char_w) as usize,
+                (inner.height() / LOG_ROW_HEIGHT) as usize,
+            );
+        }
+
         if filtered.is_empty() {
             let text = if classified.is_empty() {
                 match process.process_type {
@@ -1065,19 +1104,23 @@ impl ProcessManagerApp {
         // Wrapped lines need their layout for their height, so all are laid out; unwrapped
         // lines are one row each, so only the rows in view are laid out (the width comes from
         // the longest line, the font being monospaced).
-        let layout = |ui: &Ui, text: &str, kind: LineKind| {
-            let job = line_job(
-                text,
-                kind,
-                &words,
-                if wrap { Some(wrap_width) } else { None },
-            );
-            ui.fonts_mut(|f| f.layout_job(job))
-        };
+        let layout =
+            |ui: &Ui, line: &crate::process_manager::LogLine, text: &str, kind: LineKind| {
+                // `text` is `line.text` without a stream tag; spans are offsets into `line.text`.
+                let offset = text.as_ptr() as usize - line.text.as_ptr() as usize;
+                let job = line_job(
+                    text,
+                    kind,
+                    &words,
+                    if wrap { Some(wrap_width) } else { None },
+                    line.spans.as_deref().map(|spans| (spans, offset)),
+                );
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
         let wrapped: Vec<std::sync::Arc<egui::Galley>> = if wrap {
             filtered
                 .iter()
-                .map(|(_, _, _, kind, text)| layout(&log_ui, text, *kind))
+                .map(|(_, line, _, kind, text)| layout(&log_ui, line, text, *kind))
                 .collect()
         } else {
             Vec::new()
@@ -1127,7 +1170,7 @@ impl ProcessManagerApp {
                 }
                 let galley = match wrapped.get(index) {
                     Some(galley) => galley.clone(),
-                    None => layout(ui, text, *kind),
+                    None => layout(ui, line, text, *kind),
                 };
                 let painter = ui.painter();
                 let is_selected = *number >= lo && *number <= hi;
@@ -1426,8 +1469,16 @@ pub(super) fn tone_color(tone: Tone) -> Color32 {
     }
 }
 
-/// One log line's text as a layout job: coloured by kind, with search matches highlighted.
-fn line_job(text: &str, kind: LineKind, words: &[String], wrap: Option<f32>) -> LayoutJob {
+/// One log line's text as a layout job: coloured by kind (or by the program, for a terminal's
+/// lines), with search matches highlighted. `spans` are the terminal's styles and the offset
+/// of `text` within the line they were measured on.
+fn line_job(
+    text: &str,
+    kind: LineKind,
+    words: &[String],
+    wrap: Option<f32>,
+    spans: Option<(&[LogSpan], usize)>,
+) -> LayoutJob {
     let color = match kind {
         LineKind::Normal => LOG_TEXT,
         LineKind::Warning => AMBER,
@@ -1444,7 +1495,8 @@ fn line_job(text: &str, kind: LineKind, words: &[String], wrap: Option<f32>) -> 
         color,
         ..Default::default()
     };
-    if words.is_empty() {
+    let spans = spans.filter(|(spans, _)| !spans.is_empty());
+    if words.is_empty() && spans.is_none() {
         job.append(text, 0.0, plain);
         return job;
     }
@@ -1465,22 +1517,76 @@ fn line_job(text: &str, kind: LineKind, words: &[String], wrap: Option<f32>) -> 
         }
     }
     let hit = TextFormat {
-        font_id: font,
+        font_id: font.clone(),
         color: Color32::WHITE,
         background: theme::hit_fill(),
         ..Default::default()
     };
-    let mut run_start = 0;
-    let mut run_on = marks.first().copied().unwrap_or(false);
-    let boundary = |i: usize| text.is_char_boundary(i);
-    for i in 1..=text.len() {
-        let on = if i < text.len() { marks[i] } else { !run_on };
-        if (on != run_on || i == text.len()) && boundary(i) {
-            let slice = &text[run_start..i];
-            job.append(slice, 0.0, if run_on { hit.clone() } else { plain.clone() });
-            run_start = i;
-            run_on = on;
+    // Cut the text wherever the style or the highlight changes.
+    let local = |at: u32, offset: usize| (at as usize).saturating_sub(offset).min(text.len());
+    let mut cuts = vec![0, text.len()];
+    if let Some((spans, offset)) = spans {
+        for span in spans {
+            cuts.push(local(span.start, offset));
+            cuts.push(local(span.end, offset));
         }
     }
+    cuts.extend((1..text.len()).filter(|&i| marks[i] != marks[i - 1]));
+    cuts.retain(|&i| text.is_char_boundary(i));
+    cuts.sort_unstable();
+    cuts.dedup();
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start == end {
+            continue;
+        }
+        let format = if marks[start] {
+            hit.clone()
+        } else {
+            let style = spans.and_then(|(spans, offset)| {
+                spans
+                    .iter()
+                    .find(|s| local(s.start, offset) <= start && start < local(s.end, offset))
+            });
+            match style {
+                Some(span) => super::screen::text_format(span.style, font.clone(), color),
+                None => plain.clone(),
+            }
+        };
+        job.append(&text[start..end], 0.0, format);
+    }
     job
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::{Style, TermColor};
+
+    #[test]
+    fn terminal_spans_colour_log_lines() {
+        let style = Style {
+            fg: TermColor::Indexed(2),
+            ..Style::default()
+        };
+        let spans = [LogSpan {
+            start: 4,
+            end: 6,
+            style,
+        }];
+        let job = line_job("say ok now", LineKind::Normal, &[], None, Some((&spans, 0)));
+        let colors: Vec<(String, Color32)> = job
+            .sections
+            .iter()
+            .map(|s| (job.text[s.byte_range.clone()].to_string(), s.format.color))
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                ("say ".to_string(), LOG_TEXT),
+                ("ok".to_string(), theme::terminal_color(2)),
+                (" now".to_string(), LOG_TEXT),
+            ]
+        );
+    }
 }
