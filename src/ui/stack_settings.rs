@@ -8,7 +8,7 @@ use eframe::egui::{
 
 use crate::config::AppConfig;
 
-use super::editor::{path_edit, RelativePathSuggestion};
+use super::editor::{path_edit, switch_row, RelativePathSuggestion};
 use super::icons::Icon;
 use super::theme::{Tier, *};
 use super::widgets::{self, Btn};
@@ -101,17 +101,13 @@ impl ProcessManagerApp {
                     };
                     let right = |ui: &mut Ui, form: &mut StackSettingsForm, address: String, copy_skill: &mut bool, reload: &mut bool, open_config: &mut bool| {
                         widgets::card(ui, "Local API", |ui| {
-                            let w = ui.available_width();
-                            ui.horizontal(|ui| {
-                                ui.allocate_ui_with_layout(vec2(w - 50.0, 0.0), Layout::top_down(Align::Min), |ui| {
-                                    ui.spacing_mut().item_spacing.y = 2.0;
-                                    ui.label(RichText::new("Turn on the local API").font(bold(13.0)).color(TEXT));
-                                    ui.label(RichText::new("Scripts and agents start, stop and read the stack over HTTP. It has no password.").font(body(11.5)).color(FAINT));
-                                });
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    widgets::switch(ui, &mut form.api_enabled);
-                                });
-                            });
+                            switch_row(
+                                ui,
+                                "Turn on the local API",
+                                "Scripts and agents start, stop and read the stack over HTTP. It has no password.",
+                                &mut form.api_enabled,
+                                true,
+                            );
                             label(ui, "Port");
                             widgets::text_field(ui, "port", &mut form.port, "47821", 120.0, true);
                             hint(ui, &format!("Listens on {address}. The bind address is set in processes.json (remote_control.bind_address)."));

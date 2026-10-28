@@ -157,7 +157,7 @@ pub fn apply(ctx: &egui::Context) {
     .into();
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(12.0, 6.0);
-    style.spacing.interact_size.y = CONTROL_HEIGHT;
+    style.spacing.interact_size.y = 20.0;
     style.spacing.indent = 16.0;
     style.spacing.scroll = egui::style::ScrollStyle::thin();
     style.spacing.scroll.bar_width = 6.0;

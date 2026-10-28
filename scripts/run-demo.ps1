@@ -7,6 +7,7 @@ Runs Process Manager against the demo stack in scripts/demo, or saves a screensh
 ./scripts/run-demo.ps1 -Screenshot images/overview.png -Window 1440x900 -Open overview
 ./scripts/run-demo.ps1 -Screenshot .tmp/small.png -Window 480x560 -Open settings:ingest
 
+-After is how many seconds the stack runs before the screenshot (default 3).
 -Open takes overview, stack, new, settings, activity or palette, optionally with :<process>.
 The demo lives in .tmp/demo (an executable beside its own processes.json), so your own
 processes.json is never touched.
@@ -15,6 +16,7 @@ param(
     [string]$Screenshot,
     [string]$Window = '1440x900',
     [string]$Open,
+    [double]$After = 3,
     [switch]$Release
 )
 $ErrorActionPreference = 'Stop'
@@ -37,6 +39,7 @@ Copy-Item (Join-Path $PSScriptRoot 'demo\processes.json') (Join-Path $demo 'proc
 
 $env:PM_WINDOW = $Window
 $env:PM_OPEN = $Open
+$env:PM_SCREENSHOT_AFTER = "$After"
 if ($Screenshot) {
     $env:PM_SCREENSHOT = [System.IO.Path]::GetFullPath((Join-Path $root $Screenshot))
     New-Item -ItemType Directory -Force (Split-Path -Parent $env:PM_SCREENSHOT) | Out-Null

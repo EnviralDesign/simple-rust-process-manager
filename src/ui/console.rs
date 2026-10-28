@@ -108,61 +108,86 @@ impl ProcessManagerApp {
         let title_room = (inner_width - actions_width - 20.0).max(120.0);
 
         let title_top = head.cursor().top();
-        // Title and status.
-        let title_size = if compact { 20.0 } else { 24.0 };
-        let name_g =
-            widgets::galley_truncated(&head, &process.name, bold(title_size), TEXT, title_room);
+        // Title and status. Without the sidebar the header's switcher already names the
+        // process, so the status leads here, with Details beside it.
         let tone_color = tone_color(view.tone);
-        let status_g = widgets::galley_truncated(
-            &head,
-            &view.word,
-            bold(13.0),
-            tone_color,
-            (title_room - name_g.size().x - 30.0).max(60.0),
-        );
-        let status_inline = name_g.size().x + 14.0 + 16.0 + status_g.size().x <= title_room;
-        let (title_rect, _) = head.allocate_exact_size(
-            vec2(title_room, if compact { 26.0 } else { 30.0 }),
-            Sense::hover(),
-        );
+        let show_name = tier.has_sidebar();
+        let title_size = if compact { 20.0 } else { 24.0 };
+        let (title_rect, _) = head.allocate_exact_size(vec2(title_room, 30.0), Sense::hover());
         let painter = head.painter().clone();
-        let name_w = name_g.size().x;
-        widgets::paint_galley_left(
-            &painter,
-            pos2(title_rect.left(), title_rect.center().y),
-            name_g,
-            TEXT,
-        );
         let mut status_rect = title_rect;
-        if status_inline {
-            let x = title_rect.left() + name_w + 14.0;
-            widgets::paint_light(
+        let mut details_inline_x = None;
+        if show_name {
+            let name_g =
+                widgets::galley_truncated(&head, &process.name, bold(title_size), TEXT, title_room);
+            let status_g = widgets::galley_truncated(
                 &head,
-                &painter,
-                pos2(x + 4.0, title_rect.center().y + 1.0),
-                view.light,
+                &view.word,
+                bold(13.0),
+                tone_color,
+                (title_room - name_g.size().x - 30.0).max(60.0),
             );
+            let status_inline = name_g.size().x + 14.0 + 16.0 + status_g.size().x <= title_room;
+            let name_w = name_g.size().x;
             widgets::paint_galley_left(
                 &painter,
-                pos2(x + 16.0, title_rect.center().y + 1.0),
-                status_g,
-                tone_color,
+                pos2(title_rect.left(), title_rect.center().y),
+                name_g,
+                TEXT,
             );
+            if status_inline {
+                let x = title_rect.left() + name_w + 14.0;
+                widgets::paint_light(
+                    &head,
+                    &painter,
+                    pos2(x + 4.0, title_rect.center().y + 1.0),
+                    view.light,
+                );
+                widgets::paint_galley_left(
+                    &painter,
+                    pos2(x + 16.0, title_rect.center().y + 1.0),
+                    status_g,
+                    tone_color,
+                );
+            } else {
+                let (r, _) = head.allocate_exact_size(vec2(title_room, 20.0), Sense::hover());
+                widgets::paint_light(
+                    &head,
+                    &painter,
+                    pos2(r.left() + 4.0, r.center().y),
+                    view.light,
+                );
+                widgets::paint_galley_left(
+                    &painter,
+                    pos2(r.left() + 16.0, r.center().y),
+                    status_g,
+                    tone_color,
+                );
+                status_rect = r;
+            }
         } else {
-            let (r, _) = head.allocate_exact_size(vec2(title_room, 20.0), Sense::hover());
+            let details_w = 80.0;
+            let status_g = widgets::galley_truncated(
+                &head,
+                &view.word,
+                bold(15.0),
+                tone_color,
+                (title_room - 16.0 - details_w - 8.0).max(60.0),
+            );
+            let status_w = status_g.size().x;
             widgets::paint_light(
                 &head,
                 &painter,
-                pos2(r.left() + 4.0, r.center().y),
+                pos2(title_rect.left() + 4.0, title_rect.center().y),
                 view.light,
             );
             widgets::paint_galley_left(
                 &painter,
-                pos2(r.left() + 16.0, r.center().y),
+                pos2(title_rect.left() + 16.0, title_rect.center().y),
                 status_g,
                 tone_color,
             );
-            status_rect = r;
+            details_inline_x = Some(title_rect.left() + 16.0 + status_w + 10.0);
         }
         if let ProcessStatus::Error(message) = &status {
             let _ = head
@@ -173,7 +198,6 @@ impl ProcessManagerApp {
         // Command line and badges: always on a roomy window, behind Details on a small one.
         let show_details = !compact || self.details_open;
         if compact {
-            head.add_space(6.0);
             let label = if self.details_open {
                 "Hide details"
             } else {
@@ -184,13 +208,21 @@ impl ProcessManagerApp {
             } else {
                 Icon::CaretRight
             };
-            if Btn::new(label)
-                .with_icon(icon)
-                .ghost()
-                .xsmall()
-                .show(&mut head)
-                .clicked()
-            {
+            let button = Btn::new(label).with_icon(icon).ghost().xsmall();
+            let details_id = head.id().with("details");
+            let clicked = match details_inline_x {
+                Some(x) => {
+                    let w = button.width(&head);
+                    let r =
+                        Rect::from_min_size(pos2(x, title_rect.center().y - 11.0), vec2(w, 22.0));
+                    button.show_in(&mut head, r, details_id).clicked()
+                }
+                None => {
+                    head.add_space(6.0);
+                    button.show(&mut head).clicked()
+                }
+            };
+            if clicked {
                 self.details_open = !self.details_open;
             }
         }
@@ -349,7 +381,7 @@ impl ProcessManagerApp {
             }
         }
 
-        let bottom_pad = if compact { 10.0 } else { 14.0 };
+        let bottom_pad = if compact { 4.0 } else { 14.0 };
         let used = (head_bottom.max(actions_rect.bottom()) + bottom_pad) - outer.top();
         ui.allocate_exact_size(vec2(outer.width(), used), Sense::hover());
 
@@ -774,8 +806,27 @@ impl ProcessManagerApp {
                 Light::Running,
             ),
         ];
-        let wide_toolbar = tier >= Tier::Full;
-        if wide_toolbar {
+        // Fold the chips into one dropdown, then the toggles into a menu, as room runs out.
+        let chips_w: f32 = levels
+            .iter()
+            .map(|(_, label, n, _)| {
+                let label = widgets::galley(&bar, *label, bold(12.0), MUTED).size().x;
+                let count = widgets::galley(&bar, format::thousands(*n as u64), body(12.0), FAINT)
+                    .size()
+                    .x;
+                20.0 + 14.0 + label + 6.0 + count + 4.0
+            })
+            .sum();
+        let toggles_w = 52.0 + 54.0 + 82.0 + 26.0 + 6.0 * 4.0;
+        let selection_w = if self.selected_log_range(&process.id).is_some() {
+            150.0
+        } else {
+            0.0
+        };
+        let room = toolbar_rect.width() - search_w - 24.0 - selection_w;
+        let chips_inline = room >= chips_w + toggles_w;
+        let wide_toolbar = room >= 110.0 + toggles_w;
+        if chips_inline {
             for (level, label, n, light) in levels {
                 let n = format::thousands(n as u64);
                 if widgets::chip(

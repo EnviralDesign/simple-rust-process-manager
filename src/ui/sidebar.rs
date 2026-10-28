@@ -484,11 +484,8 @@ impl ProcessManagerApp {
         let meta_g = widgets::galley(ui, &meta, mono(10.5), FAINT);
         let name = ui.fonts_mut(|f| f.layout_job(job));
         let mut x = rect.left() + 24.0;
-        let name_w = name
-            .size()
-            .x
-            .min(rect.width() - 110.0 - meta_g.size().x)
-            .max(20.0);
+        // The name comes first; the count and the CPU and memory note give way to it.
+        let name_w = name.size().x.min(rect.width() - 24.0 - 50.0).max(20.0);
         painter
             .with_clip_rect(Rect::from_min_size(
                 pos2(x, rect.top()),
@@ -512,13 +509,9 @@ impl ProcessManagerApp {
         if !group.expanded && rollup.attention > 0 {
             widgets::paint_light(ui, painter, pos2(x + 4.0, rect.center().y), Light::Error);
         }
-        if !meta.is_empty() {
-            widgets::paint_galley_left(
-                painter,
-                pos2(rect.right() - 10.0 - meta_g.size().x, rect.center().y),
-                meta_g,
-                FAINT,
-            );
+        let meta_left = rect.right() - 10.0 - meta_g.size().x;
+        if !meta.is_empty() && meta_left > x + 12.0 {
+            widgets::paint_galley_left(painter, pos2(meta_left, rect.center().y), meta_g, FAINT);
         }
         response.on_hover_text(format!(
             "{}: {} of {} running. Click to {}; right-click for group actions.",

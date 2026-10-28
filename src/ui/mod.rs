@@ -89,6 +89,8 @@ struct RuntimeToggles {
     /// `PM_OPEN=<view>`: what the window shows first (`overview`, `settings`, `activity`,
     /// `palette`, `stack`, `new`), for screenshots.
     open: Option<String>,
+    /// `PM_SCREENSHOT_AFTER=<seconds>`: how long to let the stack run before the screenshot.
+    screenshot_after: Duration,
 }
 
 impl RuntimeToggles {
@@ -102,6 +104,7 @@ impl RuntimeToggles {
             screenshot: None,
             window_size: None,
             open: None,
+            screenshot_after: Duration::from_secs(3),
         };
 
         toggles.renderer = match std::env::var("PM_RENDERER")
@@ -143,6 +146,12 @@ impl RuntimeToggles {
             Some(Vec2::new(w.trim().parse().ok()?, h.trim().parse().ok()?))
         });
         toggles.open = std::env::var("PM_OPEN").ok();
+        if let Some(seconds) = std::env::var("PM_SCREENSHOT_AFTER")
+            .ok()
+            .and_then(|value| value.trim().parse::<f32>().ok())
+        {
+            toggles.screenshot_after = Duration::from_secs_f32(seconds.max(0.5));
+        }
 
         toggles
     }
@@ -477,7 +486,8 @@ pub struct ProcessManagerApp {
     last_rest_config_reload_version: u64,
     snapshot_key: (Option<String>, bool),
     runtime_snapshot: UiRuntimeSnapshot,
-    screenshot_frames: u32,
+    screenshot_requested: bool,
+    launched_at: Instant,
     diagnostics: DiagnosticsState,
 }
 
@@ -580,7 +590,8 @@ impl ProcessManagerApp {
             last_rest_config_reload_version: 0,
             snapshot_key: (selected_process, false),
             runtime_snapshot,
-            screenshot_frames: 0,
+            screenshot_requested: false,
+            launched_at: Instant::now(),
             diagnostics: DiagnosticsState {
                 session_label,
                 renderer_backend,
@@ -1993,9 +2004,10 @@ impl ProcessManagerApp {
         let Some(path) = self.toggles.screenshot.clone() else {
             return;
         };
-        self.screenshot_frames += 1;
         // Wait for fonts, the first snapshot and some output to arrive.
-        if self.screenshot_frames == 40 {
+        if !self.screenshot_requested && self.launched_at.elapsed() >= self.toggles.screenshot_after
+        {
+            self.screenshot_requested = true;
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
         }
         let image = ctx.input(|input| {

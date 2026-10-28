@@ -538,7 +538,7 @@ fn field_error(ui: &mut Ui, errors: &HashMap<&'static str, String>, key: &str) {
 }
 
 /// A row with a title, a hint and a switch. Returns whether the switch changed.
-fn switch_row(ui: &mut Ui, title: &str, hint: &str, on: &mut bool, first: bool) -> bool {
+pub(super) fn switch_row(ui: &mut Ui, title: &str, hint: &str, on: &mut bool, first: bool) -> bool {
     let width = ui.available_width();
     if !first {
         let (line, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
