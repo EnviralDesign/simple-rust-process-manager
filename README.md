@@ -45,8 +45,8 @@ Each process gets a console: its status in plain words, the command and where it
 Tools with rich output (Python's Rich, progress bars from pip, cargo or npm, coloured test runners) and full-screen programs (Textual apps, htop, lazygit, REPLs) check whether they are talking to a terminal. Through plain pipes they are not, so they drop their colour, hold back their progress bars, buffer their output or refuse to start. A process's **Output** setting can run it in a terminal instead (ConPTY on Windows, a pseudo-terminal on macOS) that Process Manager emulates:
 
 - **Plain output**: pipes, as before. The default, and what every `processes.json` without the setting gets.
-- **Terminal**: the log keeps the program's colours, and a progress bar or a live table updates its line in place instead of printing a hundred copies. When the program goes full screen, the console switches to its **Screen** tab, and back to the log when it leaves.
-- **Terminal, opens on its screen**: for interactive tools. The console opens on the Screen tab.
+- **Terminal (auto)**: for anything that wants a terminal, TUIs included. The log keeps the program's colours, and a progress bar or a live table updates its line in place instead of printing a hundred copies. When the program goes full screen, the console switches to its **Screen** tab, and back to the log when it leaves.
+- **Terminal (screen first)**: for interactive tools such as REPLs and prompts, which never go full screen. The console always opens on the Screen tab.
 
 ![Terminal output](images/terminal.png)
 

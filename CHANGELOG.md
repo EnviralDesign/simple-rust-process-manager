@@ -2,9 +2,9 @@
 
 Versions follow [Semantic Versioning](https://semver.org); see `AGENTS.md` for the rules.
 
-## Unreleased
+## 2.1.0
 
-Planned as 2.1.0: new features, and existing `processes.json` files run exactly as before.
+Terminals, and a new app icon. Existing `processes.json` files run exactly as before.
 
 ### New
 
@@ -12,9 +12,11 @@ Planned as 2.1.0: new features, and existing `processes.json` files run exactly 
   pseudo-terminal on macOS) instead of pipes, so tools that check for one behave as they do in a
   shell: Rich, coloured loggers and test runners keep their colours, progress bars from pip,
   cargo, npm or Rich update one line in place, and Python flushes its output as it goes.
-  - **Terminal**: the log keeps colour and redraws; when the program goes full screen (a Textual
-    app, htop, a TUI), the console switches to its **Screen** and back when it leaves.
-  - **Terminal, opens on its screen**: for interactive tools such as REPLs and prompts.
+  - **Terminal (auto)**: for anything that wants a terminal, TUIs included. The log keeps colour
+    and redraws; when the program goes full screen (a Textual app, htop, a ratatui dashboard),
+    the console switches to its **Screen** and back when it leaves.
+  - **Terminal (screen first)**: for interactive tools such as REPLs and prompts, which never go
+    full screen; the console always opens on the Screen tab.
 - The Screen tab: the program's screen as it draws it, with typing, paste, the mouse and Ctrl+C
   going to it while it has focus (the window's shortcuts wait meanwhile). Copy screen copies its
   text. A program that has ended leaves its last screen.
@@ -25,6 +27,8 @@ Planned as 2.1.0: new features, and existing `processes.json` files run exactly 
 
 ### Changed
 
+- A new app icon, the header's mark: a prompt and three status bars on a dark tile. macOS gets
+  its own copy on Apple's icon grid. `scripts/render-icon.py` draws both.
 - Nothing for existing configs: a process without `terminal_mode` (every config before this)
   runs through pipes as it always did, and `Off` is never written back.
 

@@ -240,7 +240,6 @@ pub fn skip_text(process: &ProcessConfig) -> String {
     }
 }
 
-/// The badges under a process's name.
 /// The Output choices in a process's settings, in menu order.
 pub const TERMINAL_MODES: [TerminalMode; 3] =
     [TerminalMode::Off, TerminalMode::Auto, TerminalMode::Screen];
@@ -249,8 +248,8 @@ pub const TERMINAL_MODES: [TerminalMode; 3] =
 pub fn terminal_mode_label(mode: TerminalMode) -> &'static str {
     match mode {
         TerminalMode::Off => "Plain output",
-        TerminalMode::Auto => "Terminal",
-        TerminalMode::Screen => "Terminal, opens on its screen",
+        TerminalMode::Auto => "Terminal (auto)",
+        TerminalMode::Screen => "Terminal (screen first)",
     }
 }
 
@@ -262,16 +261,18 @@ pub fn terminal_mode_hint(mode: TerminalMode) -> &'static str {
              terminal may refuse to start or draw badly."
         }
         TerminalMode::Auto => {
-            "Runs in a terminal. The log keeps the program's colours and progress bars update \
-             in place; a full-screen program switches the console to its screen."
+            "For anything that wants a terminal, TUIs included. The log keeps the program's \
+             colours and progress bars update in place; when it goes full screen (a TUI), the \
+             console switches to its screen, and back when it leaves."
         }
         TerminalMode::Screen => {
-            "Runs in a terminal and opens on its screen, where you can type into it. Its \
-             lines still reach the log."
+            "Runs in a terminal and always opens on its screen, where you can type into it: \
+             for REPLs and prompts. Its lines still reach the log."
         }
     }
 }
 
+/// The badges under a process's name.
 pub fn badges(process: &ProcessConfig) -> Vec<String> {
     let mut badges = vec![match process.process_type {
         ProcessType::Process => "Process".to_string(),
@@ -280,8 +281,8 @@ pub fn badges(process: &ProcessConfig) -> Vec<String> {
     if process.process_type == ProcessType::Process {
         match process.terminal_mode {
             TerminalMode::Off => {}
-            TerminalMode::Auto => badges.push("In a terminal".into()),
-            TerminalMode::Screen => badges.push("In a terminal · opens on its screen".into()),
+            TerminalMode::Auto => badges.push("In a terminal · auto".into()),
+            TerminalMode::Screen => badges.push("In a terminal · screen first".into()),
         }
     }
     if process.auto_start {

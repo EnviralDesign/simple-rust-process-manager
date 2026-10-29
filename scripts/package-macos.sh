@@ -43,9 +43,9 @@ fi
 iconset="$work_directory/AppIcon.iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
-    sips -z "$size" "$size" assets/icon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    sips -z "$size" "$size" assets/icon-macos.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
     doubled=$((size * 2))
-    sips -z "$doubled" "$doubled" assets/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+    sips -z "$doubled" "$doubled" assets/icon-macos.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 python3 - "$app/Contents/Info.plist" "$version" "$MACOSX_DEPLOYMENT_TARGET" <<'PY'
