@@ -16,6 +16,7 @@ It is built for the annoying real-world cases:
 
 - Start your full local stack from one window instead of juggling terminals.
 - Watch live, searchable output for any process, with errors and warnings picked out.
+- Run tools that want a real terminal: Rich and coloured output, progress bars, and full-screen TUIs you can type into.
 - See the whole stack at once: what runs, what crashed, what it costs in CPU and memory.
 - Restart unstable services automatically with managed restart and optional active hours.
 - Start dormant services from simple per-process schedules.
@@ -51,6 +52,10 @@ Tools with rich output (Python's Rich, progress bars from pip, cargo or npm, col
 ![Terminal output](images/terminal.png)
 
 The Screen tab draws the program's screen. Click it to type: keys, paste and the mouse go to the program, and the window's shortcuts wait until you click outside the screen. **Ctrl C** interrupts it, **Copy screen** copies its text. A terminal process's lines still reach the log (rows that scroll by, or have been still for a moment, are written to disk and checked for errors); what a full-screen program draws does not. New terminals start at the size of the log area (at least 100 × 24); full-screen programs follow the Screen tab's size.
+
+A ratatui dashboard running under **Terminal (auto)**, live on its Screen tab:
+
+![A TUI on the Screen tab](images/tui.gif)
 
 ### Overview
 
@@ -143,7 +148,9 @@ Output binary:
 
 ### Prebuilt Binaries
 
-See the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/releases) page.
+See the [Releases](https://github.com/EnviralDesign/simple-rust-process-manager/releases) page: a ZIP for Windows x64 (the `.exe`) and one for macOS (`Process Manager.app`). Unzip it next to a `processes.json`, or anywhere and let it create one.
+
+The macOS app has an ad-hoc signature, not a Developer ID, so Gatekeeper stops the first launch: right-click the app and choose **Open**, or run `xattr -dr com.apple.quarantine "Process Manager.app"` once.
 
 ## macOS
 
@@ -395,6 +402,8 @@ cargo build --release
 ./scripts/run-demo.ps1
 ./scripts/run-demo.ps1 -Screenshot images/overview.png -Window 1440x900 -Open overview -After 12
 ```
+
+Everything in the demo (the Acme Markets stack, its paths and its log lines) is made up. The app icon is drawn by `scripts/render-icon.py` (`uv run --with pillow python scripts/render-icon.py`) from the same mark the header paints.
 
 See `AGENTS.md` for how the code is laid out, the UI kit's rules and how releases are versioned.
 
