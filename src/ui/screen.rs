@@ -770,9 +770,15 @@ mod tests {
         assert_eq!(key(Key::Backspace, Modifiers::NONE), b"\x7f");
         assert_eq!(key(Key::Tab, Modifiers::SHIFT), b"\x1b[Z");
         assert_eq!(key(Key::D, Modifiers::CTRL), [0x04]);
-        assert_eq!(key(Key::B, Modifiers::ALT), [0x1b, b'b']);
         assert_eq!(encode_key(Key::A, Modifiers::NONE, false), None);
-        assert_eq!(encode_key(Key::V, Modifiers::CTRL, false), None);
+        if cfg!(target_os = "macos") {
+            // Option types characters on a Mac, and Ctrl+V is not paste there.
+            assert_eq!(encode_key(Key::B, Modifiers::ALT, false), None);
+            assert_eq!(key(Key::V, Modifiers::CTRL), [0x16]);
+        } else {
+            assert_eq!(key(Key::B, Modifiers::ALT), [0x1b, b'b']);
+            assert_eq!(encode_key(Key::V, Modifiers::CTRL, false), None);
+        }
     }
 
     #[test]
