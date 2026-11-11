@@ -2,6 +2,15 @@
 
 Versions follow [Semantic Versioning](https://semver.org); see `AGENTS.md` for the rules.
 
+## 2.1.1
+
+- Capture application panics, backtraces, GPU errors and shutdown events in a separate log for
+  each launch under `logs/` in the app's data directory (beside the executable on Windows).
+- Record Windows window sizes and DPI changes before the renderer handles them, along with the
+  GPU, driver and texture limits, to diagnose crashes when moving between monitors.
+- This diagnostic patch does not yet fix the oversized-window crash or change whether managed
+  processes stop when Process Manager exits.
+
 ## 2.1.0
 
 Terminals, and a new app icon. Existing `processes.json` files run exactly as before.
