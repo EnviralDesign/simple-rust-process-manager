@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod config;
+mod diagnostics;
 mod log_classification;
 mod platform;
 mod process_manager;
@@ -15,6 +16,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Err(err) = diagnostics::init(&platform::data_directory().join("logs")) {
+        eprintln!("Failed to initialize Process Manager diagnostics: {err}");
+    }
+    let result = run();
+    match &result {
+        Ok(()) => log::info!("PM exiting: main returned successfully"),
+        Err(err) => log::error!("PM exiting: {err:?}"),
+    }
+    result
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let exe_path = std::env::current_exe()?;
     let exe_directory = exe_path.parent().ok_or_else(|| {
         std::io::Error::other("Process Manager executable has no parent directory")
@@ -25,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(instance) =
         single_instance::SingleInstance::acquire(&config::AppConfig::config_path())?
     else {
+        log::info!("PM exiting: activated the existing instance");
         return Ok(());
     };
 

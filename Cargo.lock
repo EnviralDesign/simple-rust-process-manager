@@ -3017,6 +3017,7 @@ dependencies = [
  "ico",
  "image",
  "libc",
+ "log",
  "portable-pty",
  "raw-window-handle",
  "rfd",

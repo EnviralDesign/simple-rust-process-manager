@@ -235,6 +235,14 @@ pub fn run(
     #[cfg(windows)] instance: &crate::single_instance::SingleInstance,
 ) -> eframe::Result<()> {
     let toggles = RuntimeToggles::from_env();
+    log::info!(
+        "Renderer requested={} present={:?} vsync={} run_and_return={} initial_size_points={:?}",
+        toggles.renderer.label(),
+        toggles.present,
+        toggles.vsync,
+        toggles.run_and_return,
+        toggles.window_size
+    );
 
     let mut viewport = ViewportBuilder::default()
         .with_title("Process Manager")
@@ -262,7 +270,18 @@ pub fn run(
         Box::new(move |cc| {
             #[cfg(windows)]
             if let Some(hwnd) = extract_root_hwnd(cc) {
+                crate::diagnostics::observe_window(hwnd);
                 instance.register_window(hwnd)?;
+            }
+            if let Some(state) = &cc.wgpu_render_state {
+                log::info!("Renderer adapter={:?} device_max_texture_dimension_2d={} adapter_max_texture_dimension_2d={}", state.adapter.get_info(), state.device.limits().max_texture_dimension_2d, state.adapter.limits().max_texture_dimension_2d);
+                state.device.set_device_lost_callback(|reason, message| {
+                    if reason == eframe::wgpu::DeviceLostReason::Destroyed {
+                        log::info!("GPU device destroyed: {message}");
+                    } else {
+                        log::error!("GPU device lost: {reason:?}: {message}");
+                    }
+                });
             }
             Ok(Box::new(ProcessManagerApp::new(cc, toggles.clone())))
         }),
@@ -2393,6 +2412,10 @@ impl eframe::App for ProcessManagerApp {
 
 impl Drop for ProcessManagerApp {
     fn drop(&mut self) {
+        log::info!(
+            "PM GUI cleanup: panicking={} stopping managed processes",
+            std::thread::panicking()
+        );
         #[cfg(windows)]
         if let Some(icon_handle) = self.taskbar_big_icon_handle.take() {
             unsafe {
