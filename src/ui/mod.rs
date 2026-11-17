@@ -313,6 +313,13 @@ fn wgpu_configuration(
     };
 
     let mut create_new = WgpuSetupCreateNew::default();
+    let default_device_descriptor = create_new.device_descriptor.clone();
+    create_new.device_descriptor = Arc::new(move |adapter| {
+        let mut descriptor = default_device_descriptor(adapter);
+        // This small 2D UI does not need the default large GPU allocation pools.
+        descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+        descriptor
+    });
     create_new.instance_descriptor.backends = match profile {
         RendererProfile::WgpuDx12 => wgpu::Backends::DX12,
         RendererProfile::WgpuVulkan => wgpu::Backends::VULKAN,
