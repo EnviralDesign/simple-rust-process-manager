@@ -318,6 +318,8 @@ fn wgpu_configuration(
         let mut descriptor = default_device_descriptor(adapter);
         // This small 2D UI does not need the default large GPU allocation pools.
         descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+        // egui uses a few texture/uniform bindings; DX12 preallocates this entire table.
+        descriptor.required_limits.max_non_sampler_bindings = 4096;
         descriptor
     });
     create_new.instance_descriptor.backends = match profile {
