@@ -2,6 +2,17 @@
 
 Versions follow [Semantic Versioning](https://semver.org); see `AGENTS.md` for the rules.
 
+## 2.2.0
+
+- Add **Release VRAM on minimize** to Stack settings on Windows. It releases the GPU renderer
+  while processes, logs, schedules and the local API keep running, and recreates it when the
+  window is restored. Closing while minimized still shuts down managed processes normally.
+- Save the option as `release_vram_on_minimize` in `processes.json`. New configurations default
+  to on; existing files without the setting are migrated to off to preserve their behavior.
+  Changes take effect after saving, without restarting the app.
+- On an RTX 5080, minimized GPU memory settled at 0 MiB in testing, with renderer recreation
+  taking roughly 0.3–0.4 seconds. Savings and restore time vary by hardware and driver.
+
 ## 2.1.2
 
 - Reduce GPU memory reserved by the interface by using smaller allocation pools and a
