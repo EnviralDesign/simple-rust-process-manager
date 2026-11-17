@@ -23,6 +23,7 @@ pub(super) struct StackSettingsForm {
     log_directory: String,
     log_suggestion: RelativePathSuggestion,
     flash_seconds: String,
+    release_vram_on_minimize: bool,
     pub api_enabled: bool,
     port: String,
     error: Option<String>,
@@ -38,6 +39,7 @@ impl StackSettingsForm {
                 ..Default::default()
             },
             flash_seconds: config.process_error_flash_seconds.to_string(),
+            release_vram_on_minimize: config.release_vram_on_minimize,
             api_enabled: config.remote_control.enabled,
             port: config.remote_control.port.to_string(),
             error: None,
@@ -48,6 +50,7 @@ impl StackSettingsForm {
         self.stack_name.trim() != config.stack_name
             || normalize_log_directory(&self.log_directory) != config.log_directory
             || self.flash_seconds.trim() != config.process_error_flash_seconds.to_string()
+            || self.release_vram_on_minimize != config.release_vram_on_minimize
             || self.api_enabled != config.remote_control.enabled
             || self.port.trim() != config.remote_control.port.to_string()
     }
@@ -97,6 +100,17 @@ impl ProcessManagerApp {
                                 widgets::text_field(ui, "flash", &mut form.flash_seconds, "5", 64.0, true);
                                 ui.label(RichText::new("seconds a sidebar row glows after an error; 0 turns it off").font(body(12.0)).color(FAINT));
                             });
+                            switch_row(
+                                ui,
+                                "Release VRAM on minimize",
+                                if cfg!(windows) {
+                                    "Free GPU memory while minimized. Processes keep running; restoring the window may take a moment."
+                                } else {
+                                    "Available on Windows. Frees GPU memory while minimized without stopping processes."
+                                },
+                                &mut form.release_vram_on_minimize,
+                                cfg!(windows),
+                            );
                         });
                     };
                     let right = |ui: &mut Ui, form: &mut StackSettingsForm, address: String, copy_skill: &mut bool, reload: &mut bool, open_config: &mut bool| {
@@ -229,6 +243,7 @@ impl ProcessManagerApp {
         self.config.remote_control.port = port;
         self.config.log_directory = normalize_log_directory(&form.log_directory);
         self.config.process_error_flash_seconds = flash;
+        self.config.release_vram_on_minimize = form.release_vram_on_minimize;
         self.persist_config();
         self.manager
             .set_log_directory(self.config.log_directory.clone());

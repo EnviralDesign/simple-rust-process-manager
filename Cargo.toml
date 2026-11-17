@@ -5,6 +5,9 @@ edition = "2021"
 description = "A simple process manager for development environments"
 authors = ["EnviralDesign"]
 
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }
+
 [dependencies]
 arboard = "3.6"
 axum = { version = "0.8", features = ["json"] }

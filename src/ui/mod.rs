@@ -2348,6 +2348,10 @@ enum Shortcut {
 }
 
 impl eframe::App for ProcessManagerApp {
+    fn release_gpu_resources_on_minimize(&self) -> bool {
+        self.config.release_vram_on_minimize
+    }
+
     /// `PM_TYPE`: focuses the screen, then feeds the keys in as if typed.
     fn raw_input_hook(&mut self, _ctx: &Context, raw_input: &mut egui::RawInput) {
         let Some(keys) = self.toggles.type_keys.clone() else {

@@ -85,6 +85,12 @@ Ctrl/Command+K finds any process or action by name.
 
 Stack name, log folder, error flash, the local API and the config file, edited in place.
 
+On Windows, **Release VRAM on minimize** frees graphics memory while your processes keep
+running. Restoring the window briefly recreates its renderer. The setting is saved as
+`release_vram_on_minimize` in `processes.json` and applies after Save. New configurations
+default to `true`; existing files without the field are migrated to `false` to preserve
+their behavior.
+
 ![Stack settings](images/stack-settings.png)
 
 ### Small windows

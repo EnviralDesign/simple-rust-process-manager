@@ -520,6 +520,9 @@ pub struct AppConfig {
     /// How long the Processes sidebar softly flashes after a new error arrives. Set to 0 to disable.
     #[serde(default = "default_process_error_flash_seconds")]
     pub process_error_flash_seconds: u64,
+    /// Release Windows GPU resources while minimized. Missing in older files means disabled.
+    #[serde(default)]
+    pub release_vram_on_minimize: bool,
     /// One-layer sidebar groups. A process can belong to at most one group.
     #[serde(default)]
     pub groups: Vec<ProcessGroupConfig>,
@@ -546,6 +549,7 @@ impl Default for AppConfig {
             remote_control: RemoteControlConfig::default(),
             log_directory: default_log_directory(),
             process_error_flash_seconds: default_process_error_flash_seconds(),
+            release_vram_on_minimize: true,
             groups: Vec::new(),
             processes: Vec::new(),
         }
@@ -1005,6 +1009,28 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vram_release_defaults_on_for_new_configs_but_off_for_older_files() {
+        let new_config = super::AppConfig::default();
+        assert!(new_config.release_vram_on_minimize);
+
+        let old_config: super::AppConfig = serde_json::from_str(r#"{"processes":[]}"#).unwrap();
+        assert!(!old_config.release_vram_on_minimize);
+        let saved = serde_json::to_value(&old_config).unwrap();
+        assert_eq!(saved["release_vram_on_minimize"], false);
+
+        for enabled in [false, true] {
+            let config: super::AppConfig = serde_json::from_value(serde_json::json!({
+                "release_vram_on_minimize": enabled,
+                "processes": []
+            }))
+            .unwrap();
+            assert_eq!(config.release_vram_on_minimize, enabled);
+            let saved = serde_json::to_value(config).unwrap();
+            assert_eq!(saved["release_vram_on_minimize"], enabled);
+        }
+    }
+
     use super::*;
 
     #[test]
