@@ -2,6 +2,13 @@
 
 Versions follow [Semantic Versioning](https://semver.org); see `AGENTS.md` for the rules.
 
+## 2.1.2
+
+- Reduce GPU memory reserved by the interface by using smaller allocation pools and a
+  resource table sized for the app. On an RTX 5080, the same 1440×900 demo window used about
+  50 MiB of dedicated GPU memory instead of 328 MiB (85% less). Savings vary by GPU and window
+  size; the renderer, appearance and process behavior are unchanged.
+
 ## 2.1.1
 
 - Capture application panics, backtraces, GPU errors and shutdown events in a separate log for
